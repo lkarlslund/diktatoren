@@ -32,6 +32,9 @@ pub struct Document {
     selection: Range<usize>,
     /// The most recent dictated piece, for "delete that".
     last_insert: Option<Range<usize>>,
+    /// Freshly dictated text not yet tidied by the language model, with its content at the
+    /// time, so later edits that touch it can be noticed.
+    untidy: Option<(usize, String)>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
 }
@@ -50,6 +53,7 @@ impl Document {
         if text != self.text {
             self.checkpoint();
             self.last_insert = None;
+            self.untidy = None;
         }
         self.text = text;
         self.selection = clamp(&self.text, selection);
@@ -68,6 +72,7 @@ impl Document {
     }
 
     fn restore(&mut self, s: Snapshot) {
+        self.untidy = None;
         self.text = s.text;
         self.selection = s.selection;
         self.last_insert = None;
@@ -108,10 +113,92 @@ impl Document {
         self.text.replace_range(start..end, &piece);
         let inserted = start..start + piece.len();
         self.selection = inserted.end..inserted.end;
+        // Extend the untidied stretch when dictation continues right after it.
+        self.untidy = match self.untidy.take() {
+            Some((start, old)) if start + old.len() == inserted.start && self.text.get(start..start + old.len()) == Some(old.as_str()) => {
+                Some((start, self.text[start..inserted.end].to_string()))
+            }
+            _ => Some((inserted.start, self.text[inserted.clone()].to_string())),
+        };
         self.last_insert = Some(inserted);
     }
 
     pub fn apply(&mut self, command: &Command) -> Outcome {
+        let outcome = self.apply_command(command);
+        // Edits that changed the untidied stretch itself end it.
+        if let Some((start, text)) = &self.untidy
+            && self.text.get(*start..start + text.len()) != Some(text.as_str())
+        {
+            self.untidy = None;
+        }
+        outcome
+    }
+
+    /// What to send to the language model: the untidied stretch, starting back at the
+    /// beginning of its sentence so that joins between pieces get fixed too, and up to 300
+    /// bytes of text before that as context.
+    pub fn tidy_job(&self) -> Option<(usize, String, String)> {
+        let (untidy_start, untidy) = self.untidy.clone()?;
+        if untidy.trim().is_empty() {
+            return None;
+        }
+        let end = untidy_start + untidy.len();
+        let floor = |mut i: usize| {
+            while !self.text.is_char_boundary(i) {
+                i += 1;
+            }
+            i
+        };
+        let start = self.text[..untidy_start]
+            .rfind(['.', '!', '?', '\n'])
+            .map_or(0, |i| i + 1)
+            .max(floor(untidy_start.saturating_sub(300)));
+        let from = floor(start.saturating_sub(300));
+        Some((start, self.text[start..end].to_string(), self.text[from..start].to_string()))
+    }
+
+    /// Leaves the current dictation as it is, for example when the model's answer was refused.
+    pub fn forget_untidy(&mut self) {
+        self.untidy = None;
+    }
+
+    pub fn has_untidy(&self) -> bool {
+        self.untidy.as_ref().is_some_and(|(_, t)| !t.trim().is_empty())
+    }
+
+    /// Replaces the stretch that was sent for tidying, if it is still as it was. Text
+    /// dictated after it stays untidied. Returns false when the text changed meanwhile.
+    pub fn apply_tidy(&mut self, start: usize, original: &str, tidied: &str) -> bool {
+        let end = start + original.len();
+        if self.text.get(start..end) != Some(original) {
+            return false;
+        }
+        let lead: String = original.chars().take_while(|c| c.is_whitespace()).collect();
+        let mut body = tidied.trim().to_string();
+        // Do not double a mark that already follows, such as one from "next sentence".
+        if let Some(next) = self.text[end..].chars().next()
+            && ".,!?:;".contains(next)
+        {
+            while body.ends_with(['.', ',', '!', '?', ':', ';']) {
+                body.pop();
+            }
+        }
+        let replacement = format!("{lead}{body}");
+        // Dictation that arrived after the job was sent stays untidied.
+        let still_untidy = self
+            .untidy
+            .as_ref()
+            .map(|(s, t)| s + t.len())
+            .filter(|&untidy_end| untidy_end > end)
+            .map(|untidy_end| self.text[end..untidy_end].to_string());
+        self.checkpoint();
+        self.splice_keep_cursor(start..end, &replacement);
+        self.untidy = still_untidy.map(|rest| (start + replacement.len(), rest));
+        self.last_insert = None;
+        true
+    }
+
+    fn apply_command(&mut self, command: &Command) -> Outcome {
         use Command::*;
         match command {
             Insert => return Outcome::Insert,
@@ -397,6 +484,57 @@ mod tests {
         assert_eq!(d.text(), "Is it done? Yes", "no second mark after a question");
         let d = doc(&["Vi mødes", "næste sætning", "næste sætning", "ja"]);
         assert_eq!(d.text(), "Vi mødes. Ja", "repeating it does nothing more");
+    }
+
+    #[test]
+    fn tidy_replaces_only_the_untidied_text() {
+        let mut d = doc(&["Det var godt."]);
+        let (start, text, _) = d.tidy_job().unwrap();
+        assert!(d.apply_tidy(start, &text, "Det var godt."));
+        assert!(!d.has_untidy());
+
+        d.dictate("kære ole");
+        let (start, text, context) = d.tidy_job().unwrap();
+        assert_eq!(text, " Kære ole");
+        assert_eq!(context, "Det var godt.");
+        // More dictation arrives while the model works on the first piece.
+        d.dictate("tak for sidst");
+        assert!(d.apply_tidy(start, &text, "Kære Ole,"));
+        assert_eq!(d.text(), "Det var godt. Kære Ole, tak for sidst");
+        // The next job takes the whole sentence again, so the join can be fixed.
+        let (_, rest, _) = d.tidy_job().unwrap();
+        assert_eq!(rest, " Kære Ole, tak for sidst");
+        d.apply(&Command::Undo);
+        assert_eq!(d.text(), "Det var godt. Kære ole tak for sidst");
+    }
+
+    #[test]
+    fn tidy_reaches_back_to_the_sentence_start() {
+        let mut d = doc(&["Kære Ole"]);
+        let (start, text, _) = d.tidy_job().unwrap();
+        assert!(d.apply_tidy(start, &text, "Kære Ole"));
+        d.dictate("tak for sidst");
+        let (start, text, _) = d.tidy_job().unwrap();
+        assert_eq!((start, text.as_str()), (0, "Kære Ole tak for sidst"));
+        assert!(d.apply_tidy(start, &text, "Kære Ole, tak for sidst."));
+        assert_eq!(d.text(), "Kære Ole, tak for sidst.");
+    }
+
+    #[test]
+    fn tidy_is_dropped_when_the_text_changed() {
+        let mut d = doc(&["husket tager kaffe med"]);
+        let (start, text, _) = d.tidy_job().unwrap();
+        d.apply(&Command::DeleteLastWord);
+        assert!(!d.apply_tidy(start, &text, "Husk at tage kaffe med."));
+        assert_eq!(d.text(), "Husket tager kaffe");
+    }
+
+    #[test]
+    fn tidy_does_not_double_a_following_mark() {
+        let mut d = doc(&["vi ses", "næste sætning"]);
+        let (start, text, _) = d.tidy_job().unwrap();
+        assert!(d.apply_tidy(start, &text, "Vi ses."));
+        assert_eq!(d.text(), "Vi ses.");
     }
 
     #[test]

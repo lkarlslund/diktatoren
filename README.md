@@ -52,6 +52,20 @@ Turn it on under **Settings → General**. There are two kinds:
 
 After a wake word, listening stops by itself after a few seconds of silence (configurable).
 
+### AI clean-up
+
+Recognisers like Edda return words without punctuation and now and then mishear one. Under
+**Settings → Speech → AI clean-up**, point Diktatoren at an OpenAI-compatible language-model
+server (llama.cpp's `llama-server`, LM Studio, or similar) and pick a model:
+
+* **Punctuation only** adds full stops, commas and capitals, and must leave every word as it is.
+* **Punctuation and fixes** also corrects words that were clearly misheard and puts back small
+  dropped words such as "at" or "og".
+
+Your words appear at once; a moment later the sentence is replaced with the tidied version. An
+answer that changes too many words is treated as a rewrite and ignored, "undo" brings back
+what was heard, and inserting waits for a tidy-up that is still running (up to 15 seconds).
+
 ### Dictate and Edit mode
 
 The dictation window has two modes, shown as **Dictate / Edit** buttons next to the level

@@ -12,6 +12,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Font, Length, Size, Subscription, Task, keyboard, window};
 
+use crate::ai::AiMode;
 use crate::bus::{self, Action, BusEvent};
 use crate::catalog::{self, Task as ModelTask};
 use crate::commands::{self, Language, Mode};
@@ -63,6 +64,8 @@ enum Message {
     CloseRequested(window::Id),
     Deliver(String, Target),
     RestoreClipboard(String),
+    /// Finishing stops waiting for the tidy-up.
+    TidyTimeout,
     Settings(SettingsMessage),
 }
 
@@ -80,6 +83,10 @@ enum SettingsMessage {
     AsrServer(String),
     AsrServerModel(Choice),
     FetchServerModels,
+    AiMode(AiMode),
+    AiServer(String),
+    AiModel(Choice),
+    FetchAiModels,
     EnterAction(Choice),
     InsertMethod(Choice),
     PasteShortcut(String),
@@ -116,6 +123,10 @@ struct Popup {
     notice: Option<String>,
     target: Target,
     mode: Mode,
+    /// A tidy-up request is with the language model.
+    tidying: bool,
+    /// Finishing waits for the tidy-up to come back.
+    waiting: Option<Finish>,
 }
 
 struct SettingsWindow {
@@ -126,6 +137,7 @@ struct SettingsWindow {
     saved_at: Option<Instant>,
     /// Models listed by the server in `draft.asr_server`, or the error from asking.
     server_models: Result<Vec<String>, String>,
+    ai_models: Result<Vec<String>, String>,
 }
 
 struct App {
@@ -284,6 +296,13 @@ impl App {
                 });
                 Task::none()
             }
+            Message::TidyTimeout => {
+                if let Some(finish) = self.popup.as_mut().and_then(|p| p.waiting.take()) {
+                    log::warn!("tidy-up did not come back in time; finishing without it");
+                    return self.finish_now(finish);
+                }
+                Task::none()
+            }
             Message::RestoreClipboard(previous) => {
                 if let Some(c) = &mut self.clipboard {
                     let _ = c.set(&previous);
@@ -336,6 +355,21 @@ impl App {
                 }
                 Task::none()
             }
+            BusEvent::AiModels(url, models) => {
+                if let Some(w) = &mut self.settings_window
+                    && w.draft.ai_server.trim() == url.trim()
+                {
+                    if let Ok(list) = &models
+                        && w.draft.ai_model.is_empty()
+                        && let Some(first) = list.first()
+                    {
+                        w.draft.ai_model = first.clone();
+                    }
+                    w.ai_models = models;
+                }
+                Task::none()
+            }
+            BusEvent::Tidied { start, original, result } => self.tidied(start, original, result),
             BusEvent::ServerModels(url, models) => {
                 if let Some(w) = &mut self.settings_window
                     && w.draft.asr_server.trim() == url.trim()
@@ -458,7 +492,8 @@ impl App {
                 self.engine.send(EngineCommand::Listen { from_wake: false });
                 Task::none()
             }
-            Outcome::Edited | Outcome::NotFound | Outcome::SwitchMode(_) => Task::none(),
+            Outcome::Edited => self.start_tidy(),
+            Outcome::NotFound | Outcome::SwitchMode(_) => Task::none(),
         }
     }
 
@@ -537,6 +572,8 @@ impl App {
             notice: None,
             target,
             mode: Mode::Dictate,
+            tidying: false,
+            waiting: None,
         });
         open.then(move |id| {
             Task::batch([window::gain_focus(id), iced::widget::operation::focus(EDITOR)])
@@ -550,7 +587,77 @@ impl App {
         }
     }
 
+    /// Finishes, after waiting for a tidy-up of the latest dictation when one is due.
     fn finish(&mut self, finish: Finish) -> Task<Message> {
+        let uses_ai = self.settings.uses_ai();
+        if let Some(p) = &mut self.popup
+            && finish != Finish::Cancel
+            && uses_ai
+            && (p.tidying || p.doc.has_untidy())
+        {
+            if p.waiting.is_none() {
+                p.waiting = Some(finish);
+                p.notice = Some("Tidying up the text…".into());
+                self.engine.send(EngineCommand::StopListening("finishing"));
+                let start = self.start_tidy();
+                let timeout = Task::perform(tokio::time::sleep(Duration::from_secs(15)), |_| Message::TidyTimeout);
+                return Task::batch([start, timeout]);
+            }
+            return Task::none();
+        }
+        self.finish_now(finish)
+    }
+
+    /// Sends the untidied dictation to the language model, unless a request is out already.
+    fn start_tidy(&mut self) -> Task<Message> {
+        if !self.settings.uses_ai() {
+            return Task::none();
+        }
+        let Some(p) = &mut self.popup else { return Task::none() };
+        if p.tidying {
+            return Task::none();
+        }
+        let Some((start, original, context)) = p.doc.tidy_job() else { return Task::none() };
+        p.tidying = true;
+        let s = self.settings.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = crate::ai::tidy(&s.ai_server, &s.ai_model, s.ai_mode, s.text_language(), &context, &original)
+                .map_err(|e| format!("{e:#}"));
+            log::info!("tidy-up took {:.1?}", started.elapsed());
+            bus::send(BusEvent::Tidied { start, original, result });
+        });
+        Task::none()
+    }
+
+    fn tidied(&mut self, start: usize, original: String, result: Result<String, String>) -> Task<Message> {
+        let Some(p) = &mut self.popup else { return Task::none() };
+        p.tidying = false;
+        match result {
+            Ok(tidied) => {
+                if p.doc.apply_tidy(start, &original, &tidied) {
+                    log::info!("tidied {:?} → {:?}", original.trim(), tidied);
+                    sync_editor(p);
+                } else {
+                    log::info!("tidy-up dropped: the text changed meanwhile");
+                }
+            }
+            Err(e) => {
+                log::warn!("tidy-up of {:?} rejected: {e}", original.trim());
+                // Leave it as dictated rather than retrying the same text forever.
+                p.doc.forget_untidy();
+            }
+        }
+        if let Some(finish) = p.waiting
+            && !p.doc.has_untidy()
+        {
+            p.waiting = None;
+            return self.finish_now(finish);
+        }
+        self.start_tidy()
+    }
+
+    fn finish_now(&mut self, finish: Finish) -> Task<Message> {
         let Some(popup) = self.popup.take() else { return Task::none() };
         self.engine.send(EngineCommand::Standby(false));
         log::info!("finished with {finish:?}: {} characters", popup.doc.text().trim().chars().count());
@@ -609,8 +716,10 @@ impl App {
             microphones: engine::microphones(),
             saved_at: None,
             server_models: Ok(Vec::new()),
+            ai_models: Ok(Vec::new()),
         });
         fetch_server_models(&self.settings.asr_server);
+        fetch_ai_models(&self.settings.ai_server);
         open.then(window::gain_focus)
     }
 
@@ -637,6 +746,13 @@ impl App {
             M::Microphone(c) => d.input_device = c.id,
             M::AsrServer(url) => d.asr_server = url,
             M::AsrServerModel(c) => d.asr_server_model = c.id,
+            M::AiMode(mode) => d.ai_mode = mode,
+            M::AiServer(url) => d.ai_server = url,
+            M::AiModel(c) => d.ai_model = c.id,
+            M::FetchAiModels => {
+                w.ai_models = Ok(Vec::new());
+                fetch_ai_models(&d.ai_server);
+            }
             M::FetchServerModels => {
                 w.server_models = Ok(Vec::new());
                 fetch_server_models(&d.asr_server);
@@ -780,6 +896,8 @@ impl App {
         }
         if let Some(n) = &p.notice {
             body = body.push(text(n).size(13));
+        } else if p.tidying {
+            body = body.push(text("Tidying up…").size(12));
         }
         let (enter_label, ctrl_label) = match enter {
             FinishAction::Insert => ("Insert (Enter)", "Copy (Ctrl+Enter)"),
@@ -937,6 +1055,20 @@ impl App {
             Err(e) => e.clone(),
         };
         let connect = (!d.asr_server.trim().is_empty()).then_some(M::FetchServerModels);
+        let ai_models: Vec<Choice> = match &w.ai_models {
+            Ok(list) => list.iter().map(|m| choice(m, m)).collect(),
+            Err(_) => Vec::new(),
+        };
+        let ai_selected = ai_models.iter().find(|c| c.id == d.ai_model).cloned();
+        let ai_status = match &w.ai_models {
+            _ if d.ai_server.trim().is_empty() => {
+                "An OpenAI-compatible server, such as llama.cpp's llama-server or LM Studio.".to_string()
+            }
+            Ok(list) if list.is_empty() => "Press Connect to list the server's models.".into(),
+            Ok(_) => "Connected.".into(),
+            Err(e) => e.clone(),
+        };
+        let ai_connect = (!d.ai_server.trim().is_empty()).then_some(M::FetchAiModels);
         column![
             section("Speech recognition"),
             labeled(
@@ -955,6 +1087,28 @@ impl App {
                 pick_list(models, selected, M::AsrServerModel).placeholder("Connect first").width(300),
             ),
             hint(status),
+            section("AI clean-up"),
+            labeled(
+                "Clean up dictation",
+                pick_list([AiMode::Off, AiMode::Punctuate, AiMode::Correct], Some(d.ai_mode), M::AiMode).width(300),
+            ),
+            hint("A language model adds punctuation and capitals to what you dictate, and with “fixes” also corrects words the recogniser misheard. Your words appear at once and are tidied a moment later; “undo” brings back what was heard. Answers that rewrite the text are ignored."),
+            labeled(
+                "Server",
+                row![
+                    text_input("http://127.0.0.1:8003", &d.ai_server)
+                        .on_input(M::AiServer)
+                        .on_submit_maybe(ai_connect.clone())
+                        .width(300),
+                    button("Connect").on_press_maybe(ai_connect).style(secondary_button),
+                ]
+                .spacing(8),
+            ),
+            labeled(
+                "Model",
+                pick_list(ai_models, ai_selected, M::AiModel).placeholder("Connect first").width(300),
+            ),
+            hint(ai_status),
         ]
         .spacing(10)
         .into()
@@ -1179,6 +1333,18 @@ fn selection_range(text: &str, cursor: text_editor::Cursor) -> std::ops::Range<u
     let head = offset(text, cursor.position);
     let anchor = cursor.selection.map_or(head, |s| offset(text, s));
     head.min(anchor)..head.max(anchor)
+}
+
+/// Lists the models of a language-model server in the background.
+fn fetch_ai_models(url: &str) {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let models = crate::ai::models(&url).map_err(|e| format!("{e:#}"));
+        bus::send(BusEvent::AiModels(url, models));
+    });
 }
 
 /// Lists the speech models of an audio.cpp server in the background.

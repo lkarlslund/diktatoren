@@ -66,6 +66,10 @@ pub struct Settings {
     /// The audio.cpp server that recognises speech, such as `http://127.0.0.1:8099`.
     pub asr_server: String,
     pub asr_server_model: String,
+    /// Tidying dictated text with a language model on an OpenAI-compatible server.
+    pub ai_mode: crate::ai::AiMode,
+    pub ai_server: String,
+    pub ai_model: String,
     /// Language code sent with each request, or empty for the server model's default.
     pub language: String,
     /// Silence that ends an utterance.
@@ -100,6 +104,9 @@ impl Default for Settings {
             wake_word_threshold: 0.0,
             asr_server: String::new(),
             asr_server_model: String::new(),
+            ai_mode: crate::ai::AiMode::Off,
+            ai_server: String::new(),
+            ai_model: String::new(),
             language: String::new(),
             utterance_silence_ms: 700,
             wake_listen_timeout_s: 20,
@@ -154,6 +161,19 @@ impl Settings {
 
     pub fn grammar(&self) -> commands::Grammar {
         commands::Grammar::new(&self.command_phrases())
+    }
+
+    pub fn uses_ai(&self) -> bool {
+        self.ai_mode != crate::ai::AiMode::Off && !self.ai_server.trim().is_empty() && !self.ai_model.trim().is_empty()
+    }
+
+    /// The language named to the language model, from the command language.
+    pub fn text_language(&self) -> &'static str {
+        match self.command_language {
+            Language::Danish => "Danish",
+            Language::English => "English",
+            Language::Custom => "",
+        }
     }
 
     pub fn uses_server(&self) -> bool {

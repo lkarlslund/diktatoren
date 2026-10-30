@@ -32,6 +32,10 @@ pub enum BusEvent {
     DownloadFinished(String, Result<(), String>),
     /// Speech models offered by an audio.cpp server, or why they could not be listed.
     ServerModels(String, Result<Vec<String>, String>),
+    /// Models offered by the language-model server.
+    AiModels(String, Result<Vec<String>, String>),
+    /// A tidied stretch of dictation: where it started, what was sent, and the answer.
+    Tidied { start: usize, original: String, result: Result<String, String> },
     /// A new restore token from the remote-desktop portal, to persist.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     PortalToken(String),
