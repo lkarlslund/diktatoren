@@ -17,7 +17,7 @@ fn main() {
     let source = env::var_os("AUDIOCPP_SOURCE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| manifest_dir.join("../../third_party/audio.cpp"));
-    let source = source.canonicalize().unwrap_or(source);
+    let source = plain(source.canonicalize().unwrap_or(source));
     if !source.join("include/audiocpp.h").exists() {
         panic!(
             "audio.cpp sources not found at {}; run `git submodule update --init`",
@@ -84,6 +84,14 @@ fn main() {
         if let Some(profile_dir) = out.ancestors().nth(3) {
             copy_libraries(&lib_dir, &profile_dir.join("deps"), &target_os);
         }
+    }
+}
+
+/// Drops the `\\?\` prefix Windows puts on canonical paths; MSVC cannot open such paths.
+fn plain(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => path,
     }
 }
 

@@ -48,6 +48,14 @@ Models and testing:
 ";
 
 fn main() -> Result<()> {
+    // Release builds on Windows have no console of their own; borrow the terminal's so
+    // command-line use still prints.
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::System::Console::AttachConsole(
+            windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+        );
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,diktatoren=info")).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let settings = Settings::load();
