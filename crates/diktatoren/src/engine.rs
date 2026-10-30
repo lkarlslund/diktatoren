@@ -497,10 +497,9 @@ impl Engine {
         let Some(l) = &self.listening else { return };
         let Some(settings) = self.settings() else { return };
         let timeout = Duration::from_secs(settings.wake_listen_timeout_s.max(1) as u64);
-        // Only a wake with nothing said after it times out; once dictating, pauses to think
-        // must not stop listening.
-        if l.from_wake && !l.spoke && l.last_activity.elapsed() > timeout {
-            self.stop_listening("nothing said after the wake word");
+        if l.from_wake && l.speech_start.is_none() && l.last_activity.elapsed() > timeout {
+            let reason = if l.spoke { "silence after the wake word" } else { "nothing said after the wake word" };
+            self.stop_listening(reason);
         }
     }
 

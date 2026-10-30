@@ -894,7 +894,7 @@ impl App {
             labeled(
                 "Stop after silence",
                 row![
-                    slider(2.0_f32..=30.0_f32, d.wake_listen_timeout_s as f32, M::WakeTimeout).step(1.0_f32).width(200),
+                    slider(5.0_f32..=120.0_f32, d.wake_listen_timeout_s as f32, M::WakeTimeout).step(5.0_f32).width(200),
                     text(format!("{} s", d.wake_listen_timeout_s)).size(13)
                 ]
                 .spacing(10),

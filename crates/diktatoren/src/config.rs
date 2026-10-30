@@ -102,7 +102,7 @@ impl Default for Settings {
             asr_server_model: String::new(),
             language: String::new(),
             utterance_silence_ms: 700,
-            wake_listen_timeout_s: 6,
+            wake_listen_timeout_s: 20,
             input_device: String::new(),
             enter_action: FinishAction::Insert,
             insert_method: InsertMethod::Paste,
