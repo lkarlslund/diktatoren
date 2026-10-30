@@ -18,6 +18,7 @@ mod ipc;
 mod output;
 #[cfg(target_os = "linux")]
 mod portal;
+mod remote;
 mod resample;
 mod tray;
 mod wake;

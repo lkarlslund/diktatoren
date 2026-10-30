@@ -4,8 +4,9 @@ On-demand dictation for the desktop. Say your wake phrase or press a hotkey, tal
 input box, fix the text with your voice, then insert it into the window you were working in,
 copy it to the clipboard, or throw it away.
 
-Speech recognition, voice activity detection and wake-word detection all run locally through
-[audio.cpp](https://github.com/lkarlslund/audio.cpp). No audio or text leaves your machine.
+Speech recognition, voice activity detection and wake-word detection run locally through
+[audio.cpp](https://github.com/lkarlslund/audio.cpp), in-process or on an audio.cpp server
+you run yourself. No audio or text goes to anyone else.
 
 Runs on Windows, macOS and Linux (Wayland and X11) and lives in the system tray.
 
@@ -22,6 +23,15 @@ Runs on Windows, macOS and Linux (Wayland and X11) and lives in the system tray.
    (cancel). You can also say "insert", "copy" or "cancel".
 
 The tray menu has **Dictate**, **Settings…** and **Quit**.
+
+### Using an audio.cpp server
+
+If you already run [`audiocpp_server`](https://github.com/lkarlslund/audio.cpp/tree/main/app/server)
+with speech models on a GPU, Diktatoren can recognise speech there instead of loading a model
+itself. Enter the server address under **Settings → Speech** (for example
+`http://127.0.0.1:8099`), press **Connect**, and pick one of its speech models. Each utterance
+is sent as a short WAV file to `/v1/audio/transcriptions`. Wake words and voice detection
+still run locally, and live previews are off in this mode to spare the server.
 
 ### Hotkey modes
 

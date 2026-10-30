@@ -76,6 +76,9 @@ enum SettingsMessage {
     WakeTimeout(f32),
     Microphone(Choice),
     AsrPackage(Choice),
+    AsrServer(String),
+    AsrServerModel(Choice),
+    FetchServerModels,
     Language(String),
     Backend(String),
     Threads(String),
@@ -125,6 +128,8 @@ struct SettingsWindow {
     tab: Tab,
     microphones: Vec<String>,
     saved_at: Option<Instant>,
+    /// Models listed by the server in `draft.asr_server`, or the error from asking.
+    server_models: Result<Vec<String>, String>,
 }
 
 struct App {
@@ -195,8 +200,9 @@ impl App {
                 self.hotkeys = Some(hotkeys);
                 #[cfg(target_os = "linux")]
                 crate::portal::set_restore_token(self.settings.portal_restore_token.clone());
-                let first_run = catalog::find(&self.settings.asr_package)
-                    .is_none_or(|(_, p)| !p.is_installed(&self.settings.models_dir()));
+                let first_run = !self.settings.uses_server()
+                    && catalog::find(&self.settings.asr_package)
+                        .is_none_or(|(_, p)| !p.is_installed(&self.settings.models_dir()));
                 let mut tasks = Vec::new();
                 if first_run {
                     tasks.push(self.open_settings(Tab::Models));
@@ -304,6 +310,20 @@ impl App {
                         self.engine.send(EngineCommand::Configure(Box::new(self.settings.clone())));
                     }
                     Err(e) => self.status = format!("Download failed: {e}"),
+                }
+                Task::none()
+            }
+            BusEvent::ServerModels(url, models) => {
+                if let Some(w) = &mut self.settings_window
+                    && w.draft.asr_server.trim() == url.trim()
+                {
+                    if let Ok(list) = &models
+                        && w.draft.asr_server_model.is_empty()
+                        && let Some(first) = list.first()
+                    {
+                        w.draft.asr_server_model = first.clone();
+                    }
+                    w.server_models = models;
                 }
                 Task::none()
             }
@@ -519,7 +539,9 @@ impl App {
             tab,
             microphones: engine::microphones(),
             saved_at: None,
+            server_models: Ok(Vec::new()),
         });
+        fetch_server_models(&self.settings.asr_server);
         if self.sizes.is_empty() {
             fetch_sizes();
         }
@@ -541,6 +563,12 @@ impl App {
             M::WakeTimeout(t) => d.wake_listen_timeout_s = t as u32,
             M::Microphone(c) => d.input_device = c.id,
             M::AsrPackage(c) => d.asr_package = c.id,
+            M::AsrServer(url) => d.asr_server = url,
+            M::AsrServerModel(c) => d.asr_server_model = c.id,
+            M::FetchServerModels => {
+                w.server_models = Ok(Vec::new());
+                fetch_server_models(&d.asr_server);
+            }
             M::Language(s) => d.language = s.trim().to_string(),
             M::Backend(s) => d.backend = s,
             M::Threads(s) => d.threads = s.trim().parse().unwrap_or(0),
@@ -812,8 +840,43 @@ impl App {
             .map(|(f, _)| f.language_summary())
             .unwrap_or_default();
         let backends = ["best", "cpu", "cuda", "vulkan", "metal"].map(String::from).to_vec();
+        let server_models: Vec<Choice> = match &w.server_models {
+            Ok(list) => list.iter().map(|m| choice(m, m)).collect(),
+            Err(_) => Vec::new(),
+        };
+        let server_selected = server_models.iter().find(|c| c.id == d.asr_server_model).cloned();
+        let server_status = match &w.server_models {
+            _ if d.asr_server.trim().is_empty() => String::new(),
+            Ok(list) if list.is_empty() => "No speech models listed yet; press Connect.".into(),
+            Ok(list) => format!("{} speech model{} available.", list.len(), if list.len() == 1 { "" } else { "s" }),
+            Err(e) => e.clone(),
+        };
         column![
-            section("Recognition"),
+            section("Server"),
+            labeled(
+                "audio.cpp server",
+                row![
+                    text_input("empty: recognise on this computer", &d.asr_server)
+                        .on_input(M::AsrServer)
+                        .width(300),
+                    button("Connect")
+                        .on_press_maybe((!d.asr_server.trim().is_empty()).then_some(M::FetchServerModels))
+                        .style(button::secondary),
+                ]
+                .spacing(8),
+            ),
+            labeled(
+                "Server model",
+                pick_list(server_models, server_selected, M::AsrServerModel)
+                    .placeholder("Connect to list models")
+                    .width(300),
+            ),
+            hint(if server_status.is_empty() {
+                "Recognise speech on an audio.cpp server (audiocpp_server), such as http://127.0.0.1:8099, to use models it hosts on its GPU. Wake words and voice detection still run here.".to_string()
+            } else {
+                server_status
+            }),
+            section("On this computer"),
             labeled(
                 "Speech model",
                 pick_list(models, selected, M::AsrPackage).placeholder("Download one under Models").width(360),
@@ -1041,6 +1104,18 @@ fn selection_range(text: &str, cursor: text_editor::Cursor) -> std::ops::Range<u
     let head = offset(text, cursor.position);
     let anchor = cursor.selection.map_or(head, |s| offset(text, s));
     head.min(anchor)..head.max(anchor)
+}
+
+/// Lists the speech models of an audio.cpp server in the background.
+fn fetch_server_models(url: &str) {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let models = crate::remote::asr_models(&url).map_err(|e| format!("{e:#}"));
+        bus::send(BusEvent::ServerModels(url, models));
+    });
 }
 
 /// Looks up file sizes for the models page in the background.

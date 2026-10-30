@@ -58,6 +58,10 @@ pub struct Settings {
     pub wake_phrase: String,
     pub wake_word_threshold: f32,
     pub asr_package: String,
+    /// An audio.cpp server to recognise speech on instead of this computer, such as
+    /// `http://127.0.0.1:8099`. Empty means local.
+    pub asr_server: String,
+    pub asr_server_model: String,
     /// Language code passed to models that take one, or empty for the model default.
     pub language: String,
     pub backend: String,
@@ -90,6 +94,8 @@ impl Default for Settings {
             wake_phrase: "Hey Diktatoren".into(),
             wake_word_threshold: 0.0,
             asr_package: "parakeet_tdt_q8_0".into(),
+            asr_server: String::new(),
+            asr_server_model: String::new(),
             language: String::new(),
             backend: "best".into(),
             threads: 0,
@@ -129,6 +135,10 @@ impl Settings {
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, text)?;
         fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
+    }
+
+    pub fn uses_server(&self) -> bool {
+        !self.asr_server.trim().is_empty() && !self.asr_server_model.trim().is_empty()
     }
 
     pub fn models_dir(&self) -> PathBuf {
