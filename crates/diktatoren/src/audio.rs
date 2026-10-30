@@ -130,7 +130,7 @@ fn open(name: &str, sink: mpsc::Sender<Vec<f32>>) -> Result<cpal::Stream> {
     let default_config: cpal::StreamConfig = config.into();
     let mut attempts = Vec::new();
     if let Some(frames) = chunk {
-        attempts.push(cpal::StreamConfig { buffer_size: cpal::BufferSize::Fixed(frames), ..default_config.clone() });
+        attempts.push(cpal::StreamConfig { buffer_size: cpal::BufferSize::Fixed(frames), ..default_config });
     }
     attempts.push(default_config);
     let mut last_error = anyhow!("no stream configuration to try");
