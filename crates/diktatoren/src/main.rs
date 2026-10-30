@@ -60,7 +60,10 @@ fn main() -> Result<()> {
             windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
         );
     }
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,diktatoren=info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,diktatoren=info"))
+        // The D-Bus layer warns about routine portal property lookups.
+        .filter_module("zbus", log::LevelFilter::Error)
+        .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let settings = Settings::load();
     let command = args.first().map(String::as_str);

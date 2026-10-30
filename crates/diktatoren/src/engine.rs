@@ -375,6 +375,7 @@ impl Engine {
     }
 
     fn start_listening(&mut self, from_wake: bool) -> Result<()> {
+        log::info!("listen requested{}", if from_wake { " by wake word" } else { "" });
         if self.listening.is_some() {
             if let Some(l) = self.listening.as_mut() {
                 l.from_wake &= from_wake;
@@ -409,6 +410,11 @@ impl Engine {
 
     fn stop_listening(&mut self) {
         let Some(mut listening) = self.listening.take() else { return };
+        log::info!(
+            "stopped listening after {:.1}s{}",
+            listening.audio.len() as f32 / SAMPLE_RATE as f32,
+            if listening.speech_start.is_some() { ", finishing the utterance in progress" } else { "" }
+        );
         if let Some(start) = listening.speech_start.take() {
             self.finish_utterance(&listening.audio, start, listening.audio.len());
         }
@@ -425,7 +431,16 @@ impl Engine {
         let end = end.min(audio.len());
         // Ignore blips shorter than a quarter second.
         if end <= start + SAMPLE_RATE as usize / 4 {
+            log::info!("utterance of {} ms ignored as too short", (end - start) * 1000 / SAMPLE_RATE as usize);
             return;
+        }
+        log::info!(
+            "utterance {:.1}s–{:.1}s sent for recognition",
+            start as f32 / SAMPLE_RATE as f32,
+            end as f32 / SAMPLE_RATE as f32
+        );
+        if self.recogniser.is_none() {
+            log::warn!("no speech server configured; utterance dropped");
         }
         if let Some(r) = &self.recogniser {
             r.submit(Job::Final(audio[start..end].to_vec()));
@@ -437,6 +452,7 @@ impl Engine {
         let Some(settings) = self.settings() else { return };
         let timeout = Duration::from_secs(settings.wake_listen_timeout_s.max(1) as u64);
         if l.from_wake && l.speech_start.is_none() && l.last_activity.elapsed() > timeout {
+            log::info!("silence timeout after wake word");
             self.stop_listening();
         }
     }
@@ -469,7 +485,7 @@ impl Engine {
                 .any(|e| e.voice_activity.iter().any(|a| a.kind == VoiceActivityKind::SpeechSegment));
         }
         if detected {
-            log::info!("wake word detected");
+            log::info!("wake word model detected its phrase");
             // Restart the detector so the same utterance does not trigger twice.
             session.stream_reset()?;
             session.stream_start(RATE, &[])?;
@@ -700,9 +716,16 @@ impl Recogniser {
                         Job::Final(s) => (s, true),
                         Job::Preview(s) => (s, false),
                         Job::Wake(samples, phrase) => {
+                            let started = Instant::now();
                             let heard = asr.transcribe(&samples).unwrap_or_default();
-                            if let Some(rest) = wake::match_phrase(&heard, &phrase) {
-                                log::info!("wake phrase heard");
+                            let matched = wake::match_phrase(&heard, &phrase);
+                            log::info!(
+                                "idle {:.1}s heard in {:.0?}: {heard:?} → {}",
+                                samples.len() as f32 / SAMPLE_RATE as f32,
+                                started.elapsed(),
+                                if matched.is_some() { "wake phrase" } else { "ignored" }
+                            );
+                            if let Some(rest) = matched {
                                 sink(Event::WakeWord);
                                 let _ = commands.send(Command::Listen { from_wake: true });
                                 if !rest.is_empty() {
@@ -716,8 +739,8 @@ impl Recogniser {
                     match asr.transcribe(&samples) {
                         Ok(text) => {
                             let text = text.trim().to_string();
-                            log::debug!(
-                                "{} {:.1}s in {:.0?}: {text}",
+                            log::info!(
+                                "{} {:.1}s recognised in {:.0?}: {text:?}",
                                 if is_final { "final" } else { "preview" },
                                 samples.len() as f32 / SAMPLE_RATE as f32,
                                 started.elapsed()
@@ -730,7 +753,10 @@ impl Recogniser {
                                 sink(Event::Preview(text));
                             }
                         }
-                        Err(e) => sink(Event::Error(format!("recognition failed: {e:#}"))),
+                        Err(e) => {
+                            log::warn!("recognition of {:.1}s failed after {:.0?}: {e:#}", samples.len() as f32 / SAMPLE_RATE as f32, started.elapsed());
+                            sink(Event::Error(format!("recognition failed: {e:#}")));
+                        }
                     }
                 }
             })

@@ -264,6 +264,7 @@ impl App {
             }
             Message::Deliver(text, target) => {
                 let settings = self.settings.clone();
+                log::info!("inserting by {:?} ({})", settings.insert_method, settings.paste_shortcut);
                 std::thread::spawn(move || {
                     if let Err(e) = output::deliver(&text, &target, &settings) {
                         log::warn!("inserting text: {e:#}");
@@ -287,17 +288,24 @@ impl App {
     fn bus_event(&mut self, event: BusEvent) -> Task<Message> {
         match event {
             BusEvent::Engine(e) => self.engine_event(e),
-            BusEvent::HotkeyPressed => match self.settings.hotkey_mode {
-                HotkeyMode::Toggle => self.action(Action::Toggle),
-                HotkeyMode::PushToTalk => self.action(Action::Start),
-            },
+            BusEvent::HotkeyPressed => {
+                log::info!("hotkey pressed");
+                match self.settings.hotkey_mode {
+                    HotkeyMode::Toggle => self.action(Action::Toggle),
+                    HotkeyMode::PushToTalk => self.action(Action::Start),
+                }
+            }
             BusEvent::HotkeyReleased => {
+                log::info!("hotkey released");
                 if self.settings.hotkey_mode == HotkeyMode::PushToTalk {
                     self.engine.send(EngineCommand::StopListening);
                 }
                 Task::none()
             }
-            BusEvent::Action(action) => self.action(action),
+            BusEvent::Action(action) => {
+                log::info!("action {action:?}");
+                self.action(action)
+            }
             BusEvent::DownloadProgress(id, progress) => {
                 if let Some(entry) = self.downloads.get_mut(&id) {
                     entry.0 = progress;
@@ -347,6 +355,7 @@ impl App {
     fn engine_event(&mut self, event: engine::Event) -> Task<Message> {
         match event {
             engine::Event::WakeWord => {
+                log::info!("woken by wake word");
                 if self.popup.is_none() {
                     return self.open_popup();
                 }
@@ -393,16 +402,19 @@ impl App {
         p.notice = None;
         let outcome = match command {
             Some(c) => {
-                log::info!("voice command {c:?}");
-                p.doc.apply(&c)
+                let outcome = p.doc.apply(&c);
+                log::info!("{mode:?} mode: {spoken:?} → command {c:?} → {outcome:?}");
+                outcome
             }
             // While editing, speech that is no command replaces the selection, if any.
             None if mode == Mode::Edit && p.doc.selection().is_empty() => {
+                log::info!("Edit mode: {spoken:?} → no command, ignored");
                 p.notice = Some(format!("“{spoken}” is not an edit command. Say “dictate” or “diktér” to write."));
                 Outcome::Edited
             }
             None => {
                 p.doc.dictate(&spoken);
+                log::info!("{mode:?} mode: {spoken:?} → dictated");
                 Outcome::Edited
             }
         };
@@ -463,6 +475,7 @@ impl App {
             return self.focus_popup();
         }
         let target = Target::capture();
+        log::info!("dictation window opened");
         let (id, open) = window::open(window::Settings {
             size: Size::new(640.0, 280.0),
             min_size: Some(Size::new(360.0, 180.0)),
@@ -496,6 +509,7 @@ impl App {
 
     fn finish(&mut self, finish: Finish) -> Task<Message> {
         let Some(popup) = self.popup.take() else { return Task::none() };
+        log::info!("finished with {finish:?}: {} characters", popup.doc.text().trim().chars().count());
         self.engine.send(EngineCommand::StopListening);
         let close = window::close(popup.id);
         let text = popup.doc.text().trim().to_string();
