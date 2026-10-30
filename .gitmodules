@@ -1,0 +1,5 @@
+[submodule "third_party/audio.cpp"]
+	path = third_party/audio.cpp
+	url = https://github.com/lkarlslund/audio.cpp.git
+	branch = main
+	shallow = true
