@@ -750,7 +750,7 @@ impl App {
             labeled(
                     "Sensitivity",
                     row![
-                        slider(0.0..=0.99, d.wake_word_threshold, M::WakeThreshold).step(0.01).width(200),
+                        slider(0.0_f32..=0.99_f32, d.wake_word_threshold, M::WakeThreshold).step(0.01_f32).width(200),
                         text(if d.wake_word_threshold == 0.0 {
                             "model default".to_string()
                         } else {
@@ -790,7 +790,7 @@ impl App {
             labeled(
                 "Stop after silence",
                 row![
-                    slider(2.0..=30.0, d.wake_listen_timeout_s as f32, M::WakeTimeout).step(1.0).width(200),
+                    slider(2.0_f32..=30.0_f32, d.wake_listen_timeout_s as f32, M::WakeTimeout).step(1.0_f32).width(200),
                     text(format!("{} s", d.wake_listen_timeout_s)).size(13)
                 ]
                 .spacing(10),
@@ -824,7 +824,7 @@ impl App {
             labeled(
                 "End utterance after",
                 row![
-                    slider(300.0..=2000.0, d.utterance_silence_ms as f32, M::Silence).step(50.0).width(200),
+                    slider(300.0_f32..=2000.0_f32, d.utterance_silence_ms as f32, M::Silence).step(50.0_f32).width(200),
                     text(format!("{} ms of silence", d.utterance_silence_ms)).size(13)
                 ]
                 .spacing(10),
