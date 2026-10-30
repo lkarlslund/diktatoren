@@ -1,0 +1,39 @@
+# Build output
+/target/
+/dist/
+/build/
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.lib
+*.a
+*.o
+*.pdb
+
+# Models and audio never belong in the repository
+/models/
+*.gguf
+*.safetensors
+*.onnx
+*.tflite
+*.bin
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.opus
+*.m4a
+
+# Local research, notes and recordings
+/research/
+/recordings/
+*.log
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
