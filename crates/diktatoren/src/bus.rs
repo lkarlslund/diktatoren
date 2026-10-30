@@ -36,6 +36,8 @@ pub enum BusEvent {
     AiModels(String, Result<Vec<String>, String>),
     /// A tidied stretch of dictation: where it started, what was sent, and the answer.
     Tidied { start: usize, original: String, result: Result<String, String> },
+    /// The language model's answer to a spoken editing instruction.
+    Instructed { start: usize, original: String, instruction: String, result: Result<String, String> },
     /// A new restore token from the remote-desktop portal, to persist.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     PortalToken(String),

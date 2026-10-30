@@ -181,6 +181,32 @@ impl Document {
         Some((start, self.text[start..end].to_string(), self.text[from..start].to_string()))
     }
 
+    /// The selection, or the whole text when nothing is selected: what an instruction to the
+    /// language model applies to.
+    pub fn instruction_scope(&self) -> (usize, String) {
+        if self.selection.is_empty() {
+            (0, self.text.clone())
+        } else {
+            (self.selection.start, self.text[self.selection.clone()].to_string())
+        }
+    }
+
+    /// Replaces `original` at `start` with the model's edit, if the text there is unchanged.
+    /// The cursor goes to the end of the edited part.
+    pub fn apply_edit(&mut self, start: usize, original: &str, edited: &str) -> bool {
+        let end = start + original.len();
+        if self.text.get(start..end) != Some(original) {
+            return false;
+        }
+        self.checkpoint();
+        self.text.replace_range(start..end, edited);
+        let cursor = start + edited.len();
+        self.selection = cursor..cursor;
+        self.last_insert = None;
+        self.untidy = None;
+        true
+    }
+
     /// Leaves the current dictation as it is, for example when the model's answer was refused.
     pub fn forget_untidy(&mut self) {
         self.untidy = None;
@@ -609,6 +635,20 @@ mod tests {
         let (start, text, _) = d.tidy_job().unwrap();
         assert!(d.apply_tidy(start, &text, "Jeg synes, det fungerer."));
         assert_eq!(d.text(), "Jeg synes, det fungerer. hej verden");
+    }
+
+    #[test]
+    fn instructions_apply_to_the_selection_or_everything() {
+        let mut d = doc(&["Hej Søren. Vi ses i morgen."]);
+        let (start, text) = d.instruction_scope();
+        assert_eq!((start, text.as_str()), (0, "Hej Søren. Vi ses i morgen."));
+        d.apply(&Command::Select("Vi ses i morgen".into()));
+        let (start, text) = d.instruction_scope();
+        assert_eq!(text, "Vi ses i morgen");
+        assert!(d.apply_edit(start, &text, "Vi ses på fredag"));
+        assert_eq!(d.text(), "Hej Søren. Vi ses på fredag.");
+        d.apply(&Command::Undo);
+        assert_eq!(d.text(), "Hej Søren. Vi ses i morgen.");
     }
 
     #[test]

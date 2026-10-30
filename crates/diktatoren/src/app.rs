@@ -126,6 +126,8 @@ struct Popup {
     mode: Mode,
     /// A tidy-up request is with the language model.
     tidying: bool,
+    /// A spoken editing instruction is with the language model.
+    instructing: bool,
     /// Finishing waits for the tidy-up to come back.
     waiting: Option<Finish>,
     /// Dictating straight into a text field of another application, with its text as it was
@@ -372,6 +374,9 @@ impl App {
                 Task::none()
             }
             BusEvent::Tidied { start, original, result } => self.tidied(start, original, result),
+            BusEvent::Instructed { start, original, instruction, result } => {
+                self.instructed(start, original, instruction, result)
+            }
             BusEvent::ServerModels(url, models) => {
                 if let Some(w) = &mut self.settings_window
                     && w.draft.asr_server.trim() == url.trim()
@@ -450,6 +455,7 @@ impl App {
     fn utterance(&mut self, spoken: String) -> Task<Message> {
         let commands_enabled = self.settings.voice_commands;
         let dictate = self.grammar.first_phrase(&commands::Command::DictateMode).unwrap_or("dictate").to_string();
+        let uses_ai = !self.settings.ai_server.trim().is_empty() && !self.settings.ai_model.trim().is_empty();
         let Some(p) = &mut self.popup else { return Task::none() };
         p.preview.clear();
         if spoken.trim().is_empty() {
@@ -466,7 +472,28 @@ impl App {
                 log::info!("{mode:?} mode: {spoken:?} → command {c:?} → {outcome:?}");
                 outcome
             }
-            // While editing, speech that is no command replaces the selection, if any.
+            // While editing, speech that is no command is an instruction for the language
+            // model, applied to the selection or the whole text.
+            None if mode == Mode::Edit && uses_ai => {
+                if p.instructing {
+                    p.notice = Some(tr("Still working on the last instruction…").to_string());
+                } else {
+                    let (start, original) = p.doc.instruction_scope();
+                    log::info!("Edit mode: {spoken:?} → instruction for the language model ({} characters)", original.len());
+                    p.instructing = true;
+                    let s = self.settings.clone();
+                    let instruction = spoken.clone();
+                    std::thread::spawn(move || {
+                        let started = Instant::now();
+                        let result = crate::ai::instruct(&s.ai_server, &s.ai_model, s.text_language(), &original, &instruction)
+                            .map_err(|e| format!("{e:#}"));
+                        log::info!("instruction took {:.1?}", started.elapsed());
+                        bus::send(BusEvent::Instructed { start, original, instruction, result });
+                    });
+                }
+                Outcome::NotFound
+            }
+            // Without a language model, speech that is no command replaces the selection.
             None if mode == Mode::Edit && p.doc.selection().is_empty() => {
                 log::info!("Edit mode: {spoken:?} → no command, ignored");
                 p.notice = Some(trf("“{}” is not an edit command. Say “{}” to write.", &[&spoken, &dictate]));
@@ -478,7 +505,7 @@ impl App {
                 Outcome::Edited
             }
         };
-        if outcome == Outcome::NotFound {
+        if outcome == Outcome::NotFound && !p.instructing {
             p.notice = Some(trf("Nothing to change for “{}”", &[&spoken]));
         }
         if let Outcome::SwitchMode(m) = outcome {
@@ -585,6 +612,7 @@ impl App {
             target,
             mode: Mode::Dictate,
             tidying: false,
+            instructing: false,
             waiting: None,
             inline: None,
         });
@@ -621,6 +649,7 @@ impl App {
             target: Target::default(),
             mode: Mode::Dictate,
             tidying: false,
+            instructing: false,
             waiting: None,
             inline: Some((field, snapshot.text)),
         });
@@ -678,6 +707,31 @@ impl App {
             log::info!("tidy-up took {:.1?}", started.elapsed());
             bus::send(BusEvent::Tidied { start, original, result });
         });
+        Task::none()
+    }
+
+    fn instructed(&mut self, start: usize, original: String, instruction: String, result: Result<String, String>) -> Task<Message> {
+        let Some(p) = &mut self.popup else { return Task::none() };
+        p.instructing = false;
+        refresh_inline(p);
+        let before = p.doc.text().to_string();
+        match result {
+            Ok(edited) => {
+                if p.doc.apply_edit(start, &original, &edited) {
+                    log::info!("instruction {instruction:?}: {original:?} → {edited:?}");
+                    p.notice = None;
+                    push_inline(p, &before);
+                    sync_editor(p);
+                } else {
+                    log::info!("instruction {instruction:?} dropped: the text changed meanwhile");
+                    p.notice = Some(tr("The text changed meanwhile; say it again.").to_string());
+                }
+            }
+            Err(e) => {
+                log::warn!("instruction {instruction:?} failed: {e}");
+                p.notice = Some(e);
+            }
+        }
         Task::none()
     }
 
@@ -922,7 +976,9 @@ impl App {
                 .style(if on { button::primary } else { secondary_button })
         };
         let listening = self.listening;
-        let activity = if p.tidying {
+        let activity = if p.instructing {
+            tr("Working on it…").to_string()
+        } else if p.tidying {
             tr("Tidying up…").to_string()
         } else {
             p.notice.clone().unwrap_or_default()
@@ -1034,6 +1090,8 @@ impl App {
                 ))
                 .size(12),
             );
+        } else if p.instructing {
+            body = body.push(text(tr("Working on it…")).size(12));
         } else if p.tidying {
             body = body.push(text(tr("Tidying up…")).size(12));
         }

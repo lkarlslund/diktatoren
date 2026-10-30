@@ -127,6 +127,47 @@ fn without_reasoning(answer: &str) -> String {
     s
 }
 
+/// Edits `text` as the spoken `instruction` asks, returning the whole edited text.
+pub fn instruct(base: &str, model: &str, language: &str, text: &str, instruction: &str) -> Result<String> {
+    let language = if language.is_empty() { String::new() } else { format!(" The text and the instruction are in {language}.") };
+    let system = format!(
+        "You edit a text as the user asks. The instruction was spoken and comes from speech recognition, so it may contain recognition errors; read it for its intent.{language} Change only what the instruction asks for, keep everything else exactly as it is, including line breaks, and reply with the complete edited text only, without comments."
+    );
+    let request = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "max_tokens": 400 + text.len(),
+        "reasoning_effort": "none",
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": format!("Instruction: {instruction}\n\nText:\n{text}") },
+        ],
+    });
+    let response = agent()
+        .post(&endpoint(base, "v1/chat/completions"))
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("Content-Type", "application/json")
+        .send(request.to_string().as_bytes())
+        .with_context(|| format!("contacting {base}"))?;
+    let status = response.status();
+    let body = response.into_body().read_to_string()?;
+    if !status.is_success() {
+        bail!("{base}: {status}: {}", body.trim());
+    }
+    let json: serde_json::Value = serde_json::from_str(&body).context("reading the model's reply")?;
+    let answer = json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| anyhow!("the model's reply has no text"))?;
+    let edited = clean_answer(answer);
+    let edited = edited.strip_prefix("Text:").map(str::trim).unwrap_or(&edited).to_string();
+    if edited.is_empty() && !text.trim().is_empty() {
+        bail!("the model returned no text");
+    }
+    Ok(edited)
+}
+
 /// Drops reasoning blocks, the quoting or labels models like to add, and stray spaces around
 /// line breaks.
 fn clean_answer(answer: &str) -> String {
