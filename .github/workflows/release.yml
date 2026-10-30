@@ -68,7 +68,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev libxdo-dev
           if [[ "${{ matrix.features }}" == *vulkan* ]]; then
-            sudo apt-get install -y libvulkan-dev glslc
+            sudo apt-get install -y libvulkan-dev glslc spirv-headers
           fi
       - name: Build
         run: |
