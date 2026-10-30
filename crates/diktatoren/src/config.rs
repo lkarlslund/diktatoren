@@ -70,6 +70,8 @@ pub struct Settings {
     /// Only treat utterances starting with a command word ("command", "kommando") as commands.
     pub require_command_prefix: bool,
     pub models_dir: Option<PathBuf>,
+    /// Lets the Wayland remote-desktop portal skip its permission prompt after the first use.
+    pub portal_restore_token: Option<String>,
 }
 
 impl Default for Settings {
@@ -95,6 +97,7 @@ impl Default for Settings {
             voice_commands: true,
             require_command_prefix: false,
             models_dir: None,
+            portal_restore_token: None,
         }
     }
 }

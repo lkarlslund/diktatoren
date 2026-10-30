@@ -43,10 +43,6 @@ impl Document {
         self.selection.clone()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.text.trim().is_empty()
-    }
-
     /// Replaces the whole state after the user edited the text by hand.
     pub fn set_from_editor(&mut self, text: String, selection: Range<usize>) {
         if text != self.text {
@@ -55,10 +51,6 @@ impl Document {
         }
         self.text = text;
         self.selection = clamp(&self.text, selection);
-    }
-
-    pub fn clear(&mut self) {
-        *self = Document::default();
     }
 
     fn snapshot(&self) -> Snapshot {

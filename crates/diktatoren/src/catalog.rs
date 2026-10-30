@@ -11,7 +11,6 @@ pub struct Family {
     pub name: String,
     pub description: String,
     pub tasks: Vec<String>,
-    pub modes: Vec<String>,
     pub languages: Vec<String>,
     pub packages: Vec<Package>,
 }
@@ -20,10 +19,6 @@ pub struct Family {
 pub struct Package {
     pub id: String,
     pub name: String,
-    #[serde(default)]
-    pub default: bool,
-    #[serde(default)]
-    pub precision: Option<String>,
     pub directory: String,
     pub files: Vec<String>,
     #[serde(default)]
@@ -80,10 +75,6 @@ pub fn find(package_id: &str) -> Option<(&'static Family, &'static Package)> {
 }
 
 impl Family {
-    pub fn streams(&self) -> bool {
-        self.modes.iter().any(|m| m == "streaming")
-    }
-
     pub fn language_summary(&self) -> String {
         match self.languages.len() {
             0 => String::new(),

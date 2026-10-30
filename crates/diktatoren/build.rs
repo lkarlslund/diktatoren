@@ -70,8 +70,6 @@ fn catalog(specs: &Path) -> Value {
                 Some(json!({
                     "id": p["id"],
                     "name": or(&p["display_name"], &p["id"]),
-                    "default": p["default"].as_bool().unwrap_or(false),
-                    "precision": p["precision"],
                     "directory": or(&p["target_directory"], &json!("")),
                     "files": p["files"],
                     "strip_prefix": p["strip_prefix"],
@@ -88,7 +86,6 @@ fn catalog(specs: &Path) -> Value {
             "name": if spec["display_name"].is_string() { &spec["display_name"] } else { &spec["family"] },
             "description": spec["description"].as_str().unwrap_or_default(),
             "tasks": tasks,
-            "modes": spec["modes"],
             "languages": spec["languages"],
             "packages": packages,
         }));

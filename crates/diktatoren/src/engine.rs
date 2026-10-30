@@ -49,8 +49,6 @@ pub enum Command {
     Listen { from_wake: bool },
     /// Stops listening; speech in progress is still recognised.
     StopListening,
-    /// Suspends or resumes wake-word detection, e.g. while the dictation window is open.
-    WakeWordPaused(bool),
     Shutdown,
 }
 
@@ -112,7 +110,6 @@ struct Engine {
     audio_tx: mpsc::Sender<Vec<f32>>,
     audio_rx: mpsc::Receiver<Vec<f32>>,
     listening: Option<Listening>,
-    wake_paused: bool,
     wake_pos: i64,
     wake_pending: Vec<f32>,
 }
@@ -143,7 +140,6 @@ impl Engine {
             audio_tx,
             audio_rx,
             listening: None,
-            wake_paused: false,
             wake_pos: 0,
             wake_pending: Vec::new(),
         }
@@ -197,10 +193,6 @@ impl Engine {
                 }
             }
             Command::StopListening => self.stop_listening(),
-            Command::WakeWordPaused(paused) => {
-                self.wake_paused = paused;
-                self.update_microphone();
-            }
             Command::Shutdown => {}
         }
     }
@@ -316,7 +308,6 @@ impl Engine {
 
     fn wake_active(&self) -> bool {
         self.listening.is_none()
-            && !self.wake_paused
             && self.loaded.as_ref().is_some_and(|l| l.wake.is_some())
     }
 

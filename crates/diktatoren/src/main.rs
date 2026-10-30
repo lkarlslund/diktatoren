@@ -1,11 +1,25 @@
+//! Diktatoren: local on-demand dictation.
+
+// No console window on Windows release builds.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod app;
 mod audio;
+mod bus;
 mod catalog;
 mod commands;
 mod config;
 mod document;
 mod download;
 mod engine;
+mod hotkey;
+mod icon;
+mod ipc;
+mod output;
+#[cfg(target_os = "linux")]
+mod portal;
 mod resample;
+mod tray;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -15,11 +29,31 @@ use anyhow::{Context, Result, bail};
 use crate::catalog::Task;
 use crate::config::Settings;
 
+const USAGE: &str = "\
+usage: diktatoren [command]
+
+Without a command, starts Diktatoren in the tray (or opens the settings of the one running).
+
+Control a running instance:
+  toggle | start | stop     start or stop dictation
+  insert | copy | cancel    finish the open dictation
+  settings | quit
+
+Models and testing:
+  models                    list downloadable models (* = installed)
+  download <package-id>     download a model
+  transcribe <wav> [id]     transcribe a WAV file
+  listen [wav]              dictate in the terminal, from the microphone or a WAV file
+";
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let settings = Settings::load();
-    match args.first().map(String::as_str) {
+    let command = args.first().map(String::as_str);
+    match command {
+        None => run_app(settings, None, "settings"),
+        Some(word) if ipc::parse(word).is_some() => run_app(settings, ipc::parse(word), word),
         Some("models") => list_models(&settings),
         Some("download") => {
             let id = args.get(1).context("usage: diktatoren download <package-id>")?;
@@ -31,11 +65,28 @@ fn main() -> Result<()> {
             transcribe(&settings, Path::new(wav), &package)
         }
         Some("listen") => listen(settings, args.get(1)),
-        _ => {
-            println!("usage: diktatoren models | download <id> | transcribe <wav> [id]");
+        Some("-h" | "--help" | "help") => {
+            print!("{USAGE}");
             Ok(())
         }
+        Some(other) => bail!("unknown command {other:?}\n\n{USAGE}"),
     }
+}
+
+/// Hands `command` to a running instance, or becomes the instance.
+fn run_app(settings: Settings, action: Option<bus::Action>, command: &str) -> Result<()> {
+    if ipc::send_to_running(command) {
+        return Ok(());
+    }
+    if action == Some(bus::Action::Quit) {
+        return Ok(());
+    }
+    if let Err(e) = ipc::serve() {
+        log::warn!("control socket unavailable: {e:#}");
+    }
+    // A bare start shows nothing until the hotkey or tray is used.
+    let initial = action.filter(|a| *a != bus::Action::Settings || command != "settings" || std::env::args().len() > 1);
+    app::run(settings, initial).context("running the user interface")
 }
 
 fn available_families() -> Result<Vec<String>> {
