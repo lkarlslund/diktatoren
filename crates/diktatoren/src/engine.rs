@@ -1,0 +1,657 @@
+//! The speech pipeline. One thread owns the microphone and runs wake-word and voice-activity
+//! detection; finished utterances go to a recogniser thread.
+//!
+//! The microphone is only open while listening, or while idle when the wake word is enabled.
+
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, anyhow};
+use audiocpp::{Backend, Mode, Model, Registry, Session, VoiceActivityKind};
+
+use crate::audio::{self, Capture, SAMPLE_RATE};
+use crate::catalog::{self, Task};
+use crate::config::Settings;
+
+const RATE: i32 = SAMPLE_RATE as i32;
+/// Audio kept before the detected speech start.
+const PREROLL: usize = SAMPLE_RATE as usize * 3 / 10;
+/// Utterances longer than this are cut and recognised in pieces.
+const MAX_UTTERANCE: usize = SAMPLE_RATE as usize * 25;
+/// How often a live preview of the utterance in progress is recognised.
+const PREVIEW_EVERY: Duration = Duration::from_millis(900);
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// The wake word was heard; the engine has started listening.
+    WakeWord,
+    Listening(bool),
+    /// Microphone level, 0..1, while listening.
+    Level(f32),
+    /// Recognition of the utterance in progress; replaced by the next preview or final text.
+    Preview(String),
+    /// A finished utterance.
+    Utterance(String),
+    /// Models are loaded and the engine is ready.
+    Ready { asr: String },
+    Status(String),
+    Error(String),
+}
+
+#[derive(Debug)]
+pub enum Command {
+    Configure(Box<Settings>),
+    /// Starts listening. `from_wake` enables the silence timeout.
+    Listen { from_wake: bool },
+    /// Stops listening; speech in progress is still recognised.
+    StopListening,
+    /// Suspends or resumes wake-word detection, e.g. while the dictation window is open.
+    WakeWordPaused(bool),
+    Shutdown,
+}
+
+pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct Handle {
+    tx: mpsc::Sender<Command>,
+}
+
+impl Handle {
+    pub fn send(&self, command: Command) {
+        let _ = self.tx.send(command);
+    }
+}
+
+pub fn spawn(settings: Settings, sink: Sink) -> Handle {
+    let (tx, rx) = mpsc::channel();
+    let handle = Handle { tx };
+    handle.send(Command::Configure(Box::new(settings)));
+    thread::Builder::new()
+        .name("engine".into())
+        .spawn(move || Engine::new(sink).run(rx))
+        .expect("spawning engine thread");
+    handle
+}
+
+/// Where the bundled Silero VAD lives: beside the executable, or in the source tree when run
+/// from a development build.
+pub fn silero_path() -> PathBuf {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .map(|d| d.join("models/silero_vad"));
+    if let Some(p) = beside.filter(|p| p.exists()) {
+        return p;
+    }
+    // macOS app bundle: Contents/MacOS/diktatoren -> Contents/Resources/models
+    let bundle = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent()?.parent().map(|c| c.join("Resources/models/silero_vad")));
+    bundle.unwrap_or_else(|| PathBuf::from("models/silero_vad"))
+}
+
+struct Loaded {
+    /// The settings the loaded models were built from.
+    settings: Settings,
+    vad: Session,
+    vad_chunk: usize,
+    wake: Option<(Session, usize)>,
+}
+
+struct Engine {
+    sink: Sink,
+    registry: Option<Registry>,
+    loaded: Option<Loaded>,
+    recogniser: Option<Recogniser>,
+    capture: Option<Capture>,
+    audio_tx: mpsc::Sender<Vec<f32>>,
+    audio_rx: mpsc::Receiver<Vec<f32>>,
+    listening: Option<Listening>,
+    wake_paused: bool,
+    wake_pos: i64,
+    wake_pending: Vec<f32>,
+}
+
+/// State of one listening period.
+struct Listening {
+    from_wake: bool,
+    /// All audio since listening started.
+    audio: Vec<f32>,
+    vad_pos: i64,
+    vad_pending: Vec<f32>,
+    /// Start of the utterance in progress, in samples since listening started.
+    speech_start: Option<usize>,
+    last_activity: Instant,
+    last_preview: Instant,
+    level_at: Instant,
+}
+
+impl Engine {
+    fn new(sink: Sink) -> Self {
+        let (audio_tx, audio_rx) = mpsc::channel();
+        Engine {
+            sink,
+            registry: None,
+            loaded: None,
+            recogniser: None,
+            capture: None,
+            audio_tx,
+            audio_rx,
+            listening: None,
+            wake_paused: false,
+            wake_pos: 0,
+            wake_pending: Vec::new(),
+        }
+    }
+
+    fn emit(&self, event: Event) {
+        (self.sink)(event)
+    }
+
+    fn run(mut self, rx: mpsc::Receiver<Command>) {
+        loop {
+            loop {
+                match rx.try_recv() {
+                    Ok(Command::Shutdown) | Err(mpsc::TryRecvError::Disconnected) => return,
+                    Ok(command) => self.handle(command),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                }
+            }
+            if self.capture.is_none() {
+                // Nothing to read; block on commands instead of spinning.
+                match rx.recv() {
+                    Ok(Command::Shutdown) | Err(_) => return,
+                    Ok(command) => self.handle(command),
+                }
+                continue;
+            }
+            match self.audio_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(block) => {
+                    if let Err(e) = self.process(block) {
+                        self.emit(Event::Error(format!("{e:#}")));
+                        self.stop_listening();
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+            self.check_timeout();
+        }
+    }
+
+    fn handle(&mut self, command: Command) {
+        match command {
+            Command::Configure(settings) => {
+                if let Err(e) = self.configure(*settings) {
+                    self.emit(Event::Error(format!("{e:#}")));
+                }
+            }
+            Command::Listen { from_wake } => {
+                if let Err(e) = self.start_listening(from_wake) {
+                    self.emit(Event::Error(format!("{e:#}")));
+                }
+            }
+            Command::StopListening => self.stop_listening(),
+            Command::WakeWordPaused(paused) => {
+                self.wake_paused = paused;
+                self.update_microphone();
+            }
+            Command::Shutdown => {}
+        }
+    }
+
+    fn settings(&self) -> Option<&Settings> {
+        self.loaded.as_ref().map(|l| &l.settings)
+    }
+
+    fn configure(&mut self, settings: Settings) -> Result<()> {
+        if self.registry.is_none() {
+            self.registry = Some(Registry::new().context("starting audio.cpp")?);
+        }
+        let (previous, vad, wake) = match self.loaded.take() {
+            Some(l) => (Some(l.settings), Some((l.vad, l.vad_chunk)), l.wake),
+            None => (None, None, None),
+        };
+        // Silence settings travel with each stream start, so the VAD never needs reloading.
+        let (vad, vad_chunk) = match vad {
+            Some(v) => v,
+            None => {
+                let registry = self.registry.as_ref().unwrap();
+                let model = Model::load(registry, &silero_path(), Some("silero_vad"))
+                    .context("loading Silero VAD")?;
+                let session = Session::new(&model, "vad", Mode::Streaming, &cpu(), &[])?;
+                let chunk = session.preferred_chunk().unwrap_or(512);
+                (session, chunk)
+            }
+        };
+        let wake_unchanged = previous.as_ref().is_some_and(|p| {
+            p.wake_word_package == settings.wake_word_package
+                && p.wake_word_threshold == settings.wake_word_threshold
+                && p.models_dir() == settings.models_dir()
+        }) && wake.is_some() == settings.wake_word_enabled;
+        let wake = if wake_unchanged {
+            wake
+        } else {
+            drop(wake);
+            self.wake_pos = 0;
+            self.wake_pending.clear();
+            match self.load_wake(&settings) {
+                Ok(w) => w,
+                Err(e) => {
+                    self.emit(Event::Error(format!("{e:#}")));
+                    None
+                }
+            }
+        };
+        let microphone_changed =
+            previous.as_ref().is_some_and(|p| p.input_device != settings.input_device);
+        self.loaded = Some(Loaded { settings, vad, vad_chunk, wake });
+        self.reload_recogniser();
+        if microphone_changed {
+            self.capture = None;
+        }
+        self.update_microphone();
+        Ok(())
+    }
+
+    fn load_wake(&self, s: &Settings) -> Result<Option<(Session, usize)>> {
+        if !s.wake_word_enabled {
+            return Ok(None);
+        }
+        let (family, package) = catalog::find(&s.wake_word_package)
+            .ok_or_else(|| anyhow!("unknown wake word model {}", s.wake_word_package))?;
+        let dir = s.models_dir();
+        if !package.is_installed(&dir) {
+            return Err(anyhow!("wake word model {} is not downloaded", package.name));
+        }
+        let registry = self.registry.as_ref().unwrap();
+        let model = Model::load(registry, &package.load_path(&dir), Some(&family.family))
+            .with_context(|| format!("loading {}", package.name))?;
+        let mut session = Session::new(&model, Task::WakeWord.token(), Mode::Streaming, &cpu(), &[])?;
+        let chunk = session.preferred_chunk().unwrap_or(480);
+        let threshold = (s.wake_word_threshold > 0.0).then(|| s.wake_word_threshold.to_string());
+        let options: Vec<(&str, &str)> = threshold.iter().map(|t| ("threshold", t.as_str())).collect();
+        session.stream_start(RATE, &options)?;
+        Ok(Some((session, chunk)))
+    }
+
+    fn reload_recogniser(&mut self) {
+        let settings = self.loaded.as_ref().unwrap().settings.clone();
+        let backend = backend(&settings);
+        if let Some(r) = &self.recogniser
+            && r.settings.asr_package == settings.asr_package
+            && r.settings.backend == settings.backend
+            && r.settings.threads == settings.threads
+            && r.settings.language == settings.language
+        {
+            return;
+        }
+        self.recogniser = None;
+        let Some((family, package)) = catalog::find(&settings.asr_package) else {
+            self.emit(Event::Error(format!("unknown speech model {}", settings.asr_package)));
+            return;
+        };
+        let dir = settings.models_dir();
+        if !package.is_installed(&dir) {
+            self.emit(Event::Error(format!(
+                "speech model {} is not downloaded; open Settings → Models",
+                package.name
+            )));
+            return;
+        }
+        self.recogniser = Some(Recogniser::spawn(
+            settings.clone(),
+            package.load_path(&dir),
+            family.family.clone(),
+            backend,
+            package.name.clone(),
+            self.sink.clone(),
+        ));
+    }
+
+    fn wake_active(&self) -> bool {
+        self.listening.is_none()
+            && !self.wake_paused
+            && self.loaded.as_ref().is_some_and(|l| l.wake.is_some())
+    }
+
+    fn update_microphone(&mut self) {
+        let wanted = self.listening.is_some() || self.wake_active();
+        if wanted && self.capture.is_none() {
+            let device = self.settings().map(|s| s.input_device.clone()).unwrap_or_default();
+            while self.audio_rx.try_recv().is_ok() {}
+            match Capture::start(&device, self.audio_tx.clone()) {
+                Ok(c) => self.capture = Some(c),
+                Err(e) => {
+                    self.emit(Event::Error(format!("microphone: {e:#}")));
+                    self.listening = None;
+                    self.emit(Event::Listening(false));
+                }
+            }
+        } else if !wanted && self.capture.is_some() {
+            self.capture = None;
+        }
+    }
+
+    fn start_listening(&mut self, from_wake: bool) -> Result<()> {
+        if self.listening.is_some() {
+            if let Some(l) = self.listening.as_mut() {
+                l.from_wake &= from_wake;
+                l.last_activity = Instant::now();
+            }
+            return Ok(());
+        }
+        let loaded = self.loaded.as_mut().ok_or_else(|| anyhow!("speech models are not loaded"))?;
+        let silence = loaded.settings.utterance_silence_ms.to_string();
+        loaded.vad.stream_start(
+            RATE,
+            &[("min_silence_duration_ms", silence.as_str()), ("speech_pad_ms", "150")],
+        )?;
+        let now = Instant::now();
+        self.listening = Some(Listening {
+            from_wake,
+            audio: Vec::new(),
+            vad_pos: 0,
+            vad_pending: Vec::new(),
+            speech_start: None,
+            last_activity: now,
+            last_preview: now,
+            level_at: now,
+        });
+        self.update_microphone();
+        if self.capture.is_some() {
+            self.emit(Event::Listening(true));
+        }
+        Ok(())
+    }
+
+    fn stop_listening(&mut self) {
+        let Some(mut listening) = self.listening.take() else { return };
+        if let Some(start) = listening.speech_start.take() {
+            self.finish_utterance(&listening.audio, start, listening.audio.len());
+        }
+        if let Some(l) = self.loaded.as_mut() {
+            let _ = l.vad.stream_finish();
+        }
+        self.emit(Event::Listening(false));
+        self.update_microphone();
+    }
+
+    fn finish_utterance(&self, audio: &[f32], start: usize, end: usize) {
+        let start = start.saturating_sub(PREROLL);
+        let end = end.min(audio.len());
+        // Ignore blips shorter than a quarter second.
+        if end <= start + SAMPLE_RATE as usize / 4 {
+            return;
+        }
+        if let Some(r) = &self.recogniser {
+            r.submit(Job::Final(audio[start..end].to_vec()));
+        }
+    }
+
+    fn check_timeout(&mut self) {
+        let Some(l) = &self.listening else { return };
+        let Some(settings) = self.settings() else { return };
+        let timeout = Duration::from_secs(settings.wake_listen_timeout_s.max(1) as u64);
+        if l.from_wake && l.speech_start.is_none() && l.last_activity.elapsed() > timeout {
+            self.stop_listening();
+        }
+    }
+
+    fn process(&mut self, block: Vec<f32>) -> Result<()> {
+        if self.listening.is_some() {
+            return self.process_listening(block);
+        }
+        if !self.wake_active() {
+            return Ok(());
+        }
+        self.wake_pending.extend_from_slice(&block);
+        let loaded = self.loaded.as_mut().unwrap();
+        let (session, chunk) = loaded.wake.as_mut().unwrap();
+        let chunk = *chunk;
+        let mut detected = false;
+        while self.wake_pending.len() >= chunk {
+            let piece: Vec<f32> = self.wake_pending.drain(..chunk).collect();
+            let event = session.stream_push(&piece, RATE, self.wake_pos)?;
+            self.wake_pos += chunk as i64;
+            let mut events: Vec<_> = event.into_iter().collect();
+            while let Some(e) = session.stream_next_event()? {
+                events.push(e);
+            }
+            detected |= events
+                .iter()
+                .any(|e| e.voice_activity.iter().any(|a| a.kind == VoiceActivityKind::SpeechSegment));
+        }
+        if detected {
+            log::info!("wake word detected");
+            // Restart the detector so the same utterance does not trigger twice.
+            session.stream_reset()?;
+            session.stream_start(RATE, &[])?;
+            self.wake_pos = 0;
+            self.wake_pending.clear();
+            self.emit(Event::WakeWord);
+            self.start_listening(true)?;
+        }
+        Ok(())
+    }
+
+    fn process_listening(&mut self, block: Vec<f32>) -> Result<()> {
+        let preview_enabled = self.recogniser.as_ref().is_some_and(|r| r.previews);
+        let loaded = self.loaded.as_mut().unwrap();
+        let l = self.listening.as_mut().unwrap();
+        l.audio.extend_from_slice(&block);
+        l.vad_pending.extend_from_slice(&block);
+
+        if l.level_at.elapsed() > Duration::from_millis(60) {
+            let rms = (block.iter().map(|s| s * s).sum::<f32>() / block.len().max(1) as f32).sqrt();
+            l.level_at = Instant::now();
+            (self.sink)(Event::Level((rms * 6.0).min(1.0)));
+        }
+
+        let chunk = loaded.vad_chunk;
+        let mut finished = Vec::new();
+        while l.vad_pending.len() >= chunk {
+            let piece: Vec<f32> = l.vad_pending.drain(..chunk).collect();
+            let event = loaded.vad.stream_push(&piece, RATE, l.vad_pos)?;
+            l.vad_pos += chunk as i64;
+            let mut events: Vec<_> = event.into_iter().collect();
+            while let Some(e) = loaded.vad.stream_next_event()? {
+                events.push(e);
+            }
+            for activity in events.iter().flat_map(|e| e.voice_activity.iter()) {
+                let at = activity.sample.max(0) as usize;
+                match activity.kind {
+                    VoiceActivityKind::SpeechStart => {
+                        l.speech_start.get_or_insert(at);
+                        l.last_activity = Instant::now();
+                    }
+                    VoiceActivityKind::SpeechEnd => {
+                        if let Some(start) = l.speech_start.take() {
+                            finished.push((start, at));
+                        }
+                        l.last_activity = Instant::now();
+                    }
+                    VoiceActivityKind::SpeechSegment => {}
+                }
+            }
+        }
+        // Cut overly long utterances so recognition keeps up.
+        if let Some(start) = l.speech_start
+            && l.audio.len() - start > MAX_UTTERANCE
+        {
+            finished.push((start, l.audio.len()));
+            l.speech_start = Some(l.audio.len());
+        }
+        let preview = match l.speech_start {
+            Some(start) if preview_enabled && l.last_preview.elapsed() > PREVIEW_EVERY => {
+                l.last_preview = Instant::now();
+                Some(l.audio[start.saturating_sub(PREROLL)..].to_vec())
+            }
+            _ => None,
+        };
+        let audio = std::mem::take(&mut l.audio);
+        for (start, end) in finished {
+            self.finish_utterance(&audio, start, end);
+        }
+        self.listening.as_mut().unwrap().audio = audio;
+        if let (Some(samples), Some(r)) = (preview, &self.recogniser) {
+            r.submit(Job::Preview(samples));
+        }
+        Ok(())
+    }
+}
+
+/// Detection models are tiny; they stay on the CPU so they never compete with recognition.
+fn cpu() -> Backend {
+    Backend { name: "cpu".into(), device: 0, threads: 1 }
+}
+
+fn backend(settings: &Settings) -> Backend {
+    Backend { name: settings.backend.clone(), device: 0, threads: settings.threads() }
+}
+
+enum Job {
+    Final(Vec<f32>),
+    Preview(Vec<f32>),
+}
+
+#[derive(Default)]
+struct Queue {
+    finals: VecDeque<Vec<f32>>,
+    /// Only the newest preview is worth running.
+    preview: Option<Vec<f32>>,
+    closed: bool,
+}
+
+/// Runs speech recognition on its own thread so detection never stalls.
+struct Recogniser {
+    settings: Settings,
+    queue: Arc<(Mutex<Queue>, Condvar)>,
+    previews: bool,
+}
+
+impl Recogniser {
+    fn spawn(
+        settings: Settings,
+        path: PathBuf,
+        family: String,
+        backend: Backend,
+        name: String,
+        sink: Sink,
+    ) -> Self {
+        let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
+        let worker_queue = queue.clone();
+        let language = settings.language.clone();
+        thread::Builder::new()
+            .name("recogniser".into())
+            .spawn(move || {
+                sink(Event::Status(format!("Loading {name}…")));
+                let started = Instant::now();
+                let loaded = (|| -> Result<(Model, Session)> {
+                    let registry = Registry::new()?;
+                    let model = Model::load(&registry, &path, Some(&family))
+                        .with_context(|| format!("loading {name}"))?;
+                    let session = Session::new(&model, Task::Asr.token(), Mode::Offline, &backend, &[])
+                        .or_else(|e| {
+                            if backend.name == "cpu" {
+                                return Err(e);
+                            }
+                            log::warn!("{} backend failed ({e}); using cpu", backend.name);
+                            let cpu = Backend { name: "cpu".into(), ..backend.clone() };
+                            Session::new(&model, Task::Asr.token(), Mode::Offline, &cpu, &[])
+                        })?;
+                    Ok((model, session))
+                })();
+                let (model, mut session) = match loaded {
+                    Ok(v) => v,
+                    Err(e) => {
+                        sink(Event::Error(format!("{e:#}")));
+                        return;
+                    }
+                };
+                log::info!("{name} loaded in {:.1?}", started.elapsed());
+                let language_option = !language.is_empty() && model.has_request_option("language");
+                let options: Vec<(&str, &str)> = if language_option {
+                    vec![("language", language.as_str())]
+                } else {
+                    Vec::new()
+                };
+                sink(Event::Ready { asr: name.clone() });
+                let (lock, cvar) = &*worker_queue;
+                loop {
+                    let job = {
+                        let mut q = lock.lock().unwrap();
+                        loop {
+                            if q.closed {
+                                return;
+                            }
+                            if let Some(f) = q.finals.pop_front() {
+                                break Job::Final(f);
+                            }
+                            if let Some(p) = q.preview.take() {
+                                break Job::Preview(p);
+                            }
+                            q = cvar.wait(q).unwrap();
+                        }
+                    };
+                    let (samples, is_final) = match job {
+                        Job::Final(s) => (s, true),
+                        Job::Preview(s) => (s, false),
+                    };
+                    let started = Instant::now();
+                    match session.run(&samples, RATE, &options) {
+                        Ok(result) => {
+                            let text = result.text.unwrap_or_default().trim().to_string();
+                            log::debug!(
+                                "{} {:.1}s in {:.0?}: {text}",
+                                if is_final { "final" } else { "preview" },
+                                samples.len() as f32 / SAMPLE_RATE as f32,
+                                started.elapsed()
+                            );
+                            if is_final {
+                                // A final supersedes any preview queued for the same speech.
+                                lock.lock().unwrap().preview = None;
+                                sink(Event::Utterance(text));
+                            } else if lock.lock().unwrap().finals.is_empty() {
+                                sink(Event::Preview(text));
+                            }
+                        }
+                        Err(e) => sink(Event::Error(format!("recognition failed: {e}"))),
+                    }
+                }
+            })
+            .expect("spawning recogniser");
+        Recogniser { settings, queue, previews: true }
+    }
+
+    fn submit(&self, job: Job) {
+        let (lock, cvar) = &*self.queue;
+        let mut q = lock.lock().unwrap();
+        match job {
+            Job::Final(s) => {
+                q.preview = None;
+                q.finals.push_back(s);
+            }
+            Job::Preview(s) => q.preview = Some(s),
+        }
+        cvar.notify_one();
+    }
+}
+
+impl Drop for Recogniser {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.queue;
+        lock.lock().unwrap().closed = true;
+        cvar.notify_all();
+    }
+}
+
+/// Lists microphones for the settings window.
+pub fn microphones() -> Vec<String> {
+    audio::input_devices()
+}

@@ -1,8 +1,10 @@
+mod audio;
 mod catalog;
 mod commands;
 mod config;
 mod document;
 mod download;
+mod engine;
 mod resample;
 
 use std::path::Path;
@@ -28,6 +30,7 @@ fn main() -> Result<()> {
             let package = args.get(2).cloned().unwrap_or(settings.asr_package.clone());
             transcribe(&settings, Path::new(wav), &package)
         }
+        Some("listen") => listen(settings, args.get(1)),
         _ => {
             println!("usage: diktatoren models | download <id> | transcribe <wav> [id]");
             Ok(())
@@ -76,19 +79,7 @@ fn transcribe(settings: &Settings, wav: &Path, id: &str) -> Result<()> {
     if !package.is_installed(&dir) {
         bail!("{id} is not installed; run `diktatoren download {id}`");
     }
-    let mut reader = hound::WavReader::open(wav)?;
-    let spec = reader.spec();
-    let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>()?,
-        hound::SampleFormat::Int => {
-            let scale = (1u64 << (spec.bits_per_sample - 1)) as f32;
-            reader.samples::<i32>().map(|s| s.map(|v| v as f32 / scale)).collect::<Result<_, _>>()?
-        }
-    };
-    let mut mono = Vec::new();
-    resample::to_mono(&samples, spec.channels as usize, &mut mono);
-    let mut audio = Vec::new();
-    resample::Resampler::new(spec.sample_rate, 16_000).process(&mono, &mut audio);
+    let audio = audio::read_wav(wav)?;
 
     let registry = audiocpp::Registry::new()?;
     let started = std::time::Instant::now();
@@ -105,5 +96,38 @@ fn transcribe(settings: &Settings, wav: &Path, id: &str) -> Result<()> {
     let result = session.run(&audio, 16_000, &[])?;
     eprintln!("transcribed {:.1}s of audio in {:.2?}", audio.len() as f32 / 16_000.0, started.elapsed());
     println!("{}", result.text.unwrap_or_default());
+    Ok(())
+}
+
+/// Headless dictation for testing: listens until Ctrl+C and prints each utterance, applying
+/// voice commands to a document.
+fn listen(mut settings: Settings, input: Option<&String>) -> Result<()> {
+    if let Some(input) = input {
+        settings.input_device = format!("file:{input}");
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sink: engine::Sink = std::sync::Arc::new(move |e| {
+        let _ = tx.send(e);
+    });
+    let wake = settings.wake_word_enabled;
+    let handle = engine::spawn(settings.clone(), sink);
+    if !wake {
+        handle.send(engine::Command::Listen { from_wake: false });
+    }
+    let mut doc = document::Document::default();
+    for event in rx {
+        match event {
+            engine::Event::Utterance(text) => {
+                match commands::parse(&text, settings.require_command_prefix) {
+                    Some(c) => eprintln!("[command {c:?} -> {:?}]", doc.apply(&c)),
+                    None => doc.dictate(&text),
+                }
+                println!("{}", doc.text());
+            }
+            engine::Event::Preview(text) => eprintln!("… {text}"),
+            engine::Event::Level(_) => {}
+            other => eprintln!("[{other:?}]"),
+        }
+    }
     Ok(())
 }

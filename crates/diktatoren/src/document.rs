@@ -198,17 +198,15 @@ impl Document {
             }
             Replace { from, to } => {
                 let Some(range) = find_last(&self.text, from) else { return Outcome::NotFound };
-                self.checkpoint();
                 let original = &self.text[range.clone()];
                 let replacement = if original.starts_with(char::is_uppercase) {
                     capitalize(to)
                 } else {
                     to.clone()
                 };
-                self.text.replace_range(range.clone(), &replacement);
-                let end = range.start + replacement.len();
-                self.selection = end..end;
-                self.last_insert = Some(range.start..end);
+                self.checkpoint();
+                self.splice_keep_cursor(range, &replacement);
+                self.last_insert = None;
             }
             Select(what) => {
                 let Some(range) = find_last(&self.text, what) else { return Outcome::NotFound };
@@ -220,6 +218,22 @@ impl Document {
             GoToStart => self.selection = 0..0,
         }
         Outcome::Edited
+    }
+
+    /// Replaces `range` while keeping the cursor where it was relative to the surrounding text.
+    fn splice_keep_cursor(&mut self, range: Range<usize>, replacement: &str) {
+        let map = |p: usize| {
+            if p <= range.start {
+                p
+            } else if p >= range.end {
+                p - range.len() + replacement.len()
+            } else {
+                range.start + replacement.len()
+            }
+        };
+        let selection = map(self.selection.start)..map(self.selection.end);
+        self.text.replace_range(range, replacement);
+        self.selection = selection;
     }
 
     fn insert_raw(&mut self, s: &str) {
@@ -244,8 +258,7 @@ impl Document {
         } else if self.text[..start].ends_with(' ') && (end == self.text.len() || !self.text[end..].starts_with(char::is_alphanumeric)) {
             start -= 1;
         }
-        self.text.replace_range(start..end, "");
-        self.selection = start..start;
+        self.splice_keep_cursor(start..end, "");
         self.last_insert = None;
     }
 }
@@ -381,6 +394,14 @@ mod tests {
         assert_eq!(d.text(), "Tuesday is fine.");
         let d = doc(&["Det er meget meget godt.", "Slet meget."]);
         assert_eq!(d.text(), "Det er meget godt.");
+    }
+
+    #[test]
+    fn edits_by_word_keep_the_cursor_at_the_end() {
+        let d = doc(&["Meet me on Monday at ten.", "Replace Monday with Tuesday.", "Thanks."]);
+        assert_eq!(d.text(), "Meet me on Tuesday at ten. Thanks.");
+        let d = doc(&["Det er meget meget godt.", "Slet meget.", "Ja."]);
+        assert_eq!(d.text(), "Det er meget godt. Ja.");
     }
 
     #[test]
