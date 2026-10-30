@@ -32,6 +32,8 @@ pub enum Command {
     Resume,
     EditMode,
     DictateMode,
+    /// Starts item `n` of a numbered list on a new line.
+    ListItem(usize),
     /// Ends the sentence with a full stop if it has no end mark; the next words start a new one.
     NextSentence,
     NewLine,
@@ -40,8 +42,10 @@ pub enum Command {
     Redo,
     /// Deletes the selection, or else the last dictated piece.
     DeleteThat,
-    DeleteLastWord,
-    DeleteLastSentence,
+    /// Deletes this many words before the cursor.
+    DeleteLastWords(usize),
+    /// Deletes this many sentences before the cursor.
+    DeleteLastSentences(usize),
     ClearAll,
     Delete(String),
     Replace { from: String, to: String },
@@ -134,8 +138,8 @@ pub fn specs() -> Vec<Spec> {
         fixed("undo", "Undo", true, Undo, "undo, undo that", "fortryd, fortryd det"),
         fixed("delete_that", "Delete the selection or last piece", true, DeleteThat, "delete that, scratch that, strike that", "slet det, slet det der, fjern det"),
         fixed("redo", "Redo", false, Redo, "redo, redo that", "gentag, annuller fortryd"),
-        fixed("delete_last_word", "Delete the last word", false, DeleteLastWord, "delete last word, delete the last word", "slet sidste ord, fjern sidste ord"),
-        fixed("delete_last_sentence", "Delete the last sentence", false, DeleteLastSentence, "delete last sentence, delete the last sentence", "slet sidste sætning, fjern sidste sætning"),
+        fixed("delete_last_word", "Delete the last word", false, DeleteLastWords(1), "delete last word, delete the last word", "slet sidste ord, fjern sidste ord"),
+        fixed("delete_last_sentence", "Delete the last sentence", false, DeleteLastSentences(1), "delete last sentence, delete the last sentence", "slet sidste sætning, fjern sidste sætning"),
         fixed("clear_all", "Delete everything", false, ClearAll, "clear all, delete all, delete everything", "slet alt, ryd alt"),
         fixed("select_all", "Select everything", false, SelectAll, "select all, select everything", "markér alt, marker alt, vælg alt"),
         fixed("go_to_end", "Cursor to the end", false, GoToEnd, "go to end, go to the end", "gå til slutningen, til slutningen"),
@@ -205,6 +209,9 @@ impl Grammar {
         if let Some(command) = self.fixed(&body, mode) {
             return Some(command);
         }
+        if let Some(n) = list_number(&body) {
+            return Some(Command::ListItem(n));
+        }
         if mode == Mode::Dictate {
             return None;
         }
@@ -254,6 +261,9 @@ impl Grammar {
             }
         }
         if let Some(n) = verb_len(&self.delete) {
+            if let Some(command) = counted_delete(&lower[n..]) {
+                return Some(command);
+            }
             return Some(Command::Delete(clean_argument(&words[n..].join(" "))));
         }
         if let Some(n) = verb_len(&self.select) {
@@ -261,6 +271,70 @@ impl Grammar {
         }
         None
     }
+}
+
+/// "(the) last (two) sentences" after a delete verb, in English or Danish.
+fn counted_delete(words: &[String]) -> Option<Command> {
+    let mut rest = words.iter().map(String::as_str).skip_while(|w| ["the", "de", "den", "det"].contains(w));
+    if !matches!(rest.next()?, "last" | "sidste") {
+        return None;
+    }
+    let mut word = rest.next()?;
+    let count = match number(word) {
+        Some(n) => {
+            word = rest.next()?;
+            n
+        }
+        None => 1,
+    };
+    if rest.next().is_some() {
+        return None;
+    }
+    match word {
+        "word" | "words" | "ord" | "ordene" => Some(Command::DeleteLastWords(count)),
+        "sentence" | "sentences" | "sætning" | "sætninger" | "sætningen" | "sætningerne" => {
+            Some(Command::DeleteLastSentences(count))
+        }
+        _ => None,
+    }
+}
+
+/// A list number said on its own: "2", "to", "punkt to", "number two".
+fn list_number(body: &str) -> Option<usize> {
+    let words: Vec<&str> = body.split(' ').collect();
+    match words.as_slice() {
+        [n] => number(n),
+        ["punkt" | "nummer" | "point" | "number" | "item", n] => number(n),
+        _ => None,
+    }
+}
+
+/// Splits dictation that starts with a list number and a capitalised word, as recognisers
+/// write "1 Vi kan ikke se horisonten", into the number and the rest.
+pub fn leading_list_number(spoken: &str) -> Option<(usize, &str)> {
+    let (first, rest) = spoken.trim().split_once(' ')?;
+    let n = first.trim_end_matches(['.', ')', ':']).parse::<usize>().ok().filter(|n| (1..=50).contains(n))?;
+    rest.trim_start().starts_with(char::is_uppercase).then(|| (n, rest.trim_start()))
+}
+
+/// A small count, as digits or an English or Danish number word.
+fn number(word: &str) -> Option<usize> {
+    if let Ok(n) = word.parse::<usize>() {
+        return (1..=100).contains(&n).then_some(n);
+    }
+    const WORDS: [(&[&str], usize); 10] = [
+        (&["one", "en", "et"], 1),
+        (&["two", "to"], 2),
+        (&["three", "tre"], 3),
+        (&["four", "fire"], 4),
+        (&["five", "fem"], 5),
+        (&["six", "seks"], 6),
+        (&["seven", "syv"], 7),
+        (&["eight", "otte"], 8),
+        (&["nine", "ni"], 9),
+        (&["ten", "ti"], 10),
+    ];
+    WORDS.iter().find(|(names, _)| names.contains(&word)).map(|(_, n)| *n)
 }
 
 /// Lowercases, trims the punctuation recognisers add, and collapses whitespace.
@@ -339,6 +413,11 @@ mod tests {
         assert_eq!(da("Redigér.", Dictate), Some(EditMode));
         assert_eq!(da("Næste sætning.", Dictate), Some(NextSentence));
         assert_eq!(en("Next sentence", Dictate), Some(NextSentence));
+        assert_eq!(da("To.", Dictate), Some(ListItem(2)));
+        assert_eq!(da("2", Dictate), Some(ListItem(2)));
+        assert_eq!(da("Punkt tre", Dictate), Some(ListItem(3)));
+        assert_eq!(leading_list_number("1 Vi kan ikke se horisonten"), Some((1, "Vi kan ikke se horisonten")));
+        assert_eq!(leading_list_number("2 personer kommer"), None);
     }
 
     #[test]
@@ -372,7 +451,12 @@ mod tests {
         assert_eq!(da("Ret mandag til tirsdag.", Edit), Some(Replace { from: "mandag".into(), to: "tirsdag".into() }));
         assert_eq!(da("Slet meget.", Edit), Some(Delete("meget".into())));
         assert_eq!(da("Markér den røde bil.", Edit), Some(Select("den røde bil".into())));
-        assert_eq!(da("Slet sidste sætning.", Edit), Some(DeleteLastSentence));
+        assert_eq!(da("Slet sidste sætning.", Edit), Some(DeleteLastSentences(1)));
+        assert_eq!(da("Slet de sidste to sætninger", Edit), Some(DeleteLastSentences(2)));
+        assert_eq!(da("Slet de sidste 3 ord.", Edit), Some(DeleteLastWords(3)));
+        assert_eq!(en("Delete the last two sentences.", Edit), Some(DeleteLastSentences(2)));
+        assert_eq!(en("Delete last word", Edit), Some(DeleteLastWords(1)));
+        assert_eq!(da("Slet de sidste kager", Edit), Some(Delete("de sidste kager".into())));
         assert_eq!(da("Diktér.", Edit), Some(DictateMode));
         assert_eq!(en("Something else entirely", Edit), None);
     }

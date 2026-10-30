@@ -81,6 +81,10 @@ impl Document {
     /// Inserts recognised speech at the cursor, fixing up spacing and capitalisation against
     /// the surrounding text.
     pub fn dictate(&mut self, spoken: &str) {
+        if let Some((n, rest)) = crate::commands::leading_list_number(spoken) {
+            self.apply(&Command::ListItem(n));
+            return self.dictate(rest);
+        }
         let spoken = spoken.trim();
         if spoken.is_empty() {
             return;
@@ -135,8 +139,8 @@ impl Document {
     }
 
     /// What to send to the language model: the untidied stretch, starting back at the
-    /// beginning of its sentence so that joins between pieces get fixed too, and up to 300
-    /// bytes of text before that as context.
+    /// beginning of the sentence before it, so that a full stop wrongly put at a join between
+    /// pieces can still be undone, and up to 300 bytes of text before that as context.
     pub fn tidy_job(&self) -> Option<(usize, String, String)> {
         let (untidy_start, untidy) = self.untidy.clone()?;
         if untidy.trim().is_empty() {
@@ -149,10 +153,20 @@ impl Document {
             }
             i
         };
-        let start = self.text[..untidy_start]
-            .rfind(['.', '!', '?', '\n'])
-            .map_or(0, |i| i + 1)
-            .max(floor(untidy_start.saturating_sub(300)));
+        // A sentence ends at . ! ? or a line break, but not at the "2." of a list item.
+        let boundary = |upto: usize| {
+            let head = self.text[..upto].trim_end();
+            head.char_indices().rev().find(|&(i, c)| match c {
+                '!' | '?' | '\n' => true,
+                '.' => !head[..i].ends_with(|d: char| d.is_ascii_digit()),
+                _ => false,
+            }).map(|(i, _)| i)
+        };
+        let start = match boundary(untidy_start) {
+            Some(previous) => boundary(previous).map_or(0, |i| i + 1),
+            None => 0,
+        }
+        .max(floor(untidy_start.saturating_sub(300)));
         let from = floor(start.saturating_sub(300));
         Some((start, self.text[start..end].to_string(), self.text[from..start].to_string()))
     }
@@ -173,7 +187,13 @@ impl Document {
         if self.text.get(start..end) != Some(original) {
             return false;
         }
-        let lead: String = original.chars().take_while(|c| c.is_whitespace()).collect();
+        // The model may ask for a new line or paragraph before this text.
+        let breaks = tidied.chars().take_while(|&c| c == '\n').count();
+        let lead: String = if breaks > 0 && start > 0 {
+            "\n".repeat(breaks)
+        } else {
+            original.chars().take_while(|c| c.is_whitespace()).collect()
+        };
         let mut body = tidied.trim().to_string();
         // Do not double a mark that already follows, such as one from "next sentence".
         if let Some(next) = self.text[end..].chars().next()
@@ -218,6 +238,18 @@ impl Document {
                 self.undo.push(self.snapshot());
                 self.restore(next);
             }
+            ListItem(n) => {
+                self.checkpoint();
+                let at = self.selection.start;
+                let head = self.text[..at].trim_end_matches(' ');
+                let trimmed = head.len();
+                let lead = if head.is_empty() || head.ends_with('\n') { "" } else { "\n" };
+                let marker = format!("{lead}{n}. ");
+                self.text.replace_range(trimmed..self.selection.end, &marker);
+                let cursor = trimmed + marker.len();
+                self.selection = cursor..cursor;
+                self.last_insert = None;
+            }
             NextSentence => {
                 let at = self.selection.start;
                 let head = self.text[..at].trim_end();
@@ -253,32 +285,44 @@ impl Document {
                 };
                 self.delete_range(range);
             }
-            DeleteLastWord => {
+            DeleteLastWords(count) => {
                 let end = self.selection.start;
-                let head = self.text[..end].trim_end();
-                let start = head
-                    .char_indices()
-                    .rev()
-                    .find(|(_, c)| c.is_whitespace())
-                    .map_or(0, |(i, c)| i + c.len_utf8());
+                let mut start = end;
+                for _ in 0..*count {
+                    let head = self.text[..start].trim_end();
+                    if head.is_empty() {
+                        break;
+                    }
+                    start = head
+                        .char_indices()
+                        .rev()
+                        .find(|(_, c)| c.is_whitespace())
+                        .map_or(0, |(i, c)| i + c.len_utf8());
+                }
                 if start == end {
                     return Outcome::NotFound;
                 }
                 self.delete_range(start..end);
             }
-            DeleteLastSentence => {
+            DeleteLastSentences(count) => {
                 let end = self.selection.start;
-                let head = self.text[..end].trim_end();
-                if head.is_empty() {
+                let mut start = end;
+                for _ in 0..*count {
+                    let head = self.text[..start].trim_end();
+                    if head.is_empty() {
+                        break;
+                    }
+                    // Skip the terminator of the sentence being deleted.
+                    let body = head.trim_end_matches(['.', '!', '?']);
+                    start = body
+                        .char_indices()
+                        .rev()
+                        .find(|(_, c)| matches!(c, '.' | '!' | '?' | '\n'))
+                        .map_or(0, |(i, c)| i + c.len_utf8());
+                }
+                if start == end {
                     return Outcome::NotFound;
                 }
-                // Skip the terminator of the sentence being deleted.
-                let body = head.trim_end_matches(['.', '!', '?']);
-                let start = body
-                    .char_indices()
-                    .rev()
-                    .find(|(_, c)| matches!(c, '.' | '!' | '?' | '\n'))
-                    .map_or(0, |(i, c)| i + c.len_utf8());
                 self.delete_range(start..end);
             }
             ClearAll => {
@@ -495,15 +539,15 @@ mod tests {
 
         d.dictate("kære ole");
         let (start, text, context) = d.tidy_job().unwrap();
-        assert_eq!(text, " Kære ole");
-        assert_eq!(context, "Det var godt.");
+        assert_eq!(text, "Det var godt. Kære ole", "the sentence before is included");
+        assert_eq!(context, "");
         // More dictation arrives while the model works on the first piece.
         d.dictate("tak for sidst");
-        assert!(d.apply_tidy(start, &text, "Kære Ole,"));
+        assert!(d.apply_tidy(start, &text, "Det var godt. Kære Ole,"));
         assert_eq!(d.text(), "Det var godt. Kære Ole, tak for sidst");
-        // The next job takes the whole sentence again, so the join can be fixed.
+        // The next job takes the sentences again, so the join can be fixed.
         let (_, rest, _) = d.tidy_job().unwrap();
-        assert_eq!(rest, " Kære Ole, tak for sidst");
+        assert_eq!(rest, "Det var godt. Kære Ole, tak for sidst");
         d.apply(&Command::Undo);
         assert_eq!(d.text(), "Det var godt. Kære ole tak for sidst");
     }
@@ -521,10 +565,34 @@ mod tests {
     }
 
     #[test]
+    fn tidy_can_undo_a_full_stop_at_a_join() {
+        let mut d = doc(&["Vi følger lidt op"]);
+        let (start, text, _) = d.tidy_job().unwrap();
+        assert!(d.apply_tidy(start, &text, "Vi følger lidt op."));
+        d.dictate("på de ting vi har");
+        let (start, text, _) = d.tidy_job().unwrap();
+        assert_eq!(text, "Vi følger lidt op. På de ting vi har");
+        assert!(d.apply_tidy(start, &text, "Vi følger lidt op på de ting, vi har."));
+        assert_eq!(d.text(), "Vi følger lidt op på de ting, vi har.");
+    }
+
+    #[test]
+    fn tidy_can_start_a_new_paragraph() {
+        let mut d = doc(&["Kære Ole, tak for sidst."]);
+        let (start, text, _) = d.tidy_job().unwrap();
+        assert!(d.apply_tidy(start, &text, "Kære Ole, tak for sidst."));
+        d.dictate("mange hilsner lars");
+        let (start, text, _) = d.tidy_job().unwrap();
+        assert_eq!(text, "Kære Ole, tak for sidst. Mange hilsner lars");
+        assert!(d.apply_tidy(start, &text, "Kære Ole, tak for sidst.\n\nMange hilsner\nLars"));
+        assert_eq!(d.text(), "Kære Ole, tak for sidst.\n\nMange hilsner\nLars");
+    }
+
+    #[test]
     fn tidy_is_dropped_when_the_text_changed() {
         let mut d = doc(&["husket tager kaffe med"]);
         let (start, text, _) = d.tidy_job().unwrap();
-        d.apply(&Command::DeleteLastWord);
+        d.apply(&Command::DeleteLastWords(1));
         assert!(!d.apply_tidy(start, &text, "Husk at tage kaffe med."));
         assert_eq!(d.text(), "Husket tager kaffe");
     }
@@ -538,14 +606,20 @@ mod tests {
     }
 
     #[test]
+    fn numbered_lists() {
+        let d = doc(&["Der kommer en liste.", "1 Vi kan ikke se horisonten", "to", "det er belastende"]);
+        assert_eq!(d.text(), "Der kommer en liste.\n1. Vi kan ikke se horisonten\n2. Det er belastende");
+    }
+
+    #[test]
     fn delete_that_and_undo() {
-        let mut d = doc(&["One.", "Two."]);
+        let mut d = doc(&["Apples.", "Pears."]);
         d.apply(&Command::DeleteThat);
-        assert_eq!(d.text(), "One.");
+        assert_eq!(d.text(), "Apples.");
         d.apply(&Command::Undo);
-        assert_eq!(d.text(), "One. Two.");
+        assert_eq!(d.text(), "Apples. Pears.");
         d.apply(&Command::Redo);
-        assert_eq!(d.text(), "One.");
+        assert_eq!(d.text(), "Apples.");
     }
 
     #[test]
@@ -554,6 +628,16 @@ mod tests {
         assert_eq!(d.text(), "Det er en rigtig god dag.");
         let d = doc(&["Det er en rigtig god dag", "slet sidste ord"]);
         assert_eq!(d.text(), "Det er en rigtig god");
+    }
+
+    #[test]
+    fn delete_several() {
+        let d = doc(&["Første. Anden. Tredje.", "slet de sidste to sætninger"]);
+        assert_eq!(d.text(), "Første.");
+        let d = doc(&["en to tre fire", "slet de sidste tre ord"]);
+        assert_eq!(d.text(), "En");
+        let d = doc(&["Kort.", "slet de sidste fem sætninger"]);
+        assert_eq!(d.text(), "", "more than there are deletes all");
     }
 
     #[test]

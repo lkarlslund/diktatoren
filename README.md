@@ -62,6 +62,10 @@ server (llama.cpp's `llama-server`, LM Studio, or similar) and pick a model:
 * **Punctuation and fixes** also corrects words that were clearly misheard and puts back small
   dropped words such as "at" or "og".
 
+It also lays the text out: a line break after a salutation ("Hej Søren,"), the sign-off and
+name on their own lines, and a blank line between paragraphs. A number said on its own
+("et", "to", "punkt 3") starts a numbered list item on a new line.
+
 Your words appear at once; a moment later the sentence is replaced with the tidied version. An
 answer that changes too many words is treated as a rewrite and ignored, "undo" brings back
 what was heard, and inserting waits for a tidy-up that is still running (up to 15 seconds).

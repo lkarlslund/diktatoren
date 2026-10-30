@@ -65,7 +65,7 @@ fn instructions(mode: AiMode, language: &str) -> String {
         _ => "Add punctuation and capital letters. Keep every word exactly as given, in the same order; do not add, remove, correct or translate words.",
     };
     format!(
-        "You clean up text from {language}. {task} The text may continue earlier text, which is given for context only and must not be repeated. Reply with the cleaned-up text only."
+        "You clean up text from {language}. {task} The speaker may still be talking, so end the text with a full stop only where the sentence is clearly complete; a full stop that splits one sentence in two may be removed. Break the text into lines and paragraphs where a careful writer would: a salutation such as \"Hej Søren\" or \"Kære Ole\" takes a comma and a line break after the name and no comma before it, and the text after it starts with a capital letter; a sign-off such as \"Med venlig hilsen\" or \"Mange hilsner\" starts a new paragraph, with the name on the next line and no comma; each item of a numbered list goes on its own line, starting with its number as a digit and a full stop (\"1.\", \"2.\"), also when the number was spoken as a word such as \"et\", \"to\" or \"punkt et\"; never drop a number; and a blank line goes between paragraphs. The text may continue earlier text, which is given for context only and must not be repeated; if the text should begin on a new line or paragraph after it, begin your reply with that line break. Reply with the cleaned-up text only."
     )
 }
 
@@ -104,12 +104,19 @@ pub fn tidy(base: &str, model: &str, mode: AiMode, language: &str, context: &str
         .as_str()
         .ok_or_else(|| anyhow!("the model's reply has no text"))?;
     let cleaned = clean_answer(answer);
-    check(mode, text, &cleaned)?;
-    Ok(cleaned)
+    check(mode, text, &cleaned).map_err(|e| anyhow!("{e}; it answered {cleaned:?}"))?;
+    // A reply that starts with a line break asks for the text to begin a new line or paragraph.
+    let breaks = without_reasoning(answer)
+        .trim_start_matches([' ', '\t', '"', '“'])
+        .chars()
+        .take_while(|&c| c == '\n' || c == '\r')
+        .filter(|&c| c == '\n')
+        .count()
+        .min(2);
+    Ok(format!("{}{cleaned}", "\n".repeat(breaks)))
 }
 
-/// Drops reasoning blocks and the quoting or labels models like to add.
-fn clean_answer(answer: &str) -> String {
+fn without_reasoning(answer: &str) -> String {
     let mut s = answer.to_string();
     while let (Some(a), Some(b)) = (s.find("<think>"), s.find("</think>")) {
         if b < a {
@@ -117,9 +124,17 @@ fn clean_answer(answer: &str) -> String {
         }
         s.replace_range(a..b + "</think>".len(), "");
     }
+    s
+}
+
+/// Drops reasoning blocks, the quoting or labels models like to add, and stray spaces around
+/// line breaks.
+fn clean_answer(answer: &str) -> String {
+    let s = without_reasoning(answer);
     let s = s.trim();
     let s = s.strip_prefix("Text to clean up:").unwrap_or(s).trim();
-    s.trim_matches(|c| c == '"' || c == '“' || c == '”').trim().to_string()
+    let s = s.trim_matches(|c| c == '"' || c == '“' || c == '”').trim();
+    s.lines().map(str::trim).collect::<Vec<_>>().join("\n")
 }
 
 fn words(s: &str) -> Vec<String> {
@@ -155,6 +170,14 @@ fn check(mode: AiMode, original: &str, answer: &str) -> Result<()> {
     if changed > allowed {
         bail!("the model changed {changed} of {} words", before.len());
     }
+    // Numbers the recogniser heard as digits must survive; list numbers and amounts matter.
+    let digits = |words: &[String]| -> Vec<String> {
+        words.iter().filter(|w| w.chars().all(|c| c.is_ascii_digit())).cloned().collect()
+    };
+    let kept = digits(&after);
+    if let Some(lost) = digits(&before).into_iter().find(|n| !kept.contains(n)) {
+        bail!("the model dropped the number {lost}");
+    }
     Ok(())
 }
 
@@ -174,6 +197,18 @@ mod tests {
         assert!(check(AiMode::Correct, raw, "Vi mødes på mandag klokken ti. Husk at tage et kaffe med.").is_ok());
         assert!(check(AiMode::Correct, raw, "Lad os ses mandag kl. 10, og tag gerne kaffe med.").is_err());
         assert!(check(AiMode::Correct, raw, "").is_err());
+    }
+
+    #[test]
+    fn keeps_line_breaks() {
+        assert_eq!(clean_answer("Kære Ole, \n\n Tak for sidst."), "Kære Ole,\n\nTak for sidst.");
+    }
+
+    #[test]
+    fn numbers_are_kept() {
+        let raw = "vi kan ikke se horisonten 2 det er belastende";
+        assert!(check(AiMode::Correct, raw, "Vi kan ikke se horisonten.\n2. Det er belastende.").is_ok());
+        assert!(check(AiMode::Correct, raw, "Vi kan ikke se horisonten. Det er belastende.").is_err());
     }
 
     #[test]
