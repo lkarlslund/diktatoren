@@ -213,7 +213,10 @@ impl Document {
                 body.pop();
             }
         }
-        let replacement = format!("{lead}{body}");
+        // Keep the space that separates this stretch from what follows it.
+        let trail: String = original.chars().rev().take_while(|c| *c == ' ').collect();
+        let trail = if self.text[end..].starts_with(char::is_whitespace) { String::new() } else { trail };
+        let replacement = format!("{lead}{body}{trail}");
         // Dictation that arrived after the job was sent stays untidied.
         let still_untidy = self
             .untidy
@@ -595,6 +598,17 @@ mod tests {
         assert_eq!(text, "Kære Ole, tak for sidst. Mange hilsner lars");
         assert!(d.apply_tidy(start, &text, "Kære Ole, tak for sidst.\n\nMange hilsner\nLars"));
         assert_eq!(d.text(), "Kære Ole, tak for sidst.\n\nMange hilsner\nLars");
+    }
+
+    #[test]
+    fn tidy_keeps_the_space_before_following_text() {
+        let mut d = Document::default();
+        d.sync_from("hej verden".into(), 0..0);
+        d.dictate("jeg synes det fungerer");
+        assert_eq!(d.text(), "Jeg synes det fungerer hej verden");
+        let (start, text, _) = d.tidy_job().unwrap();
+        assert!(d.apply_tidy(start, &text, "Jeg synes, det fungerer."));
+        assert_eq!(d.text(), "Jeg synes, det fungerer. hej verden");
     }
 
     #[test]

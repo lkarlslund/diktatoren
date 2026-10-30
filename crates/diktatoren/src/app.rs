@@ -1453,7 +1453,15 @@ fn sync_doc(doc: &mut Document, snapshot: &crate::a11y::Snapshot) {
 fn refresh_inline(p: &mut Popup) {
     if let Some((field, _)) = &p.inline {
         match crate::a11y::read(field) {
-            Ok(snapshot) => sync_doc(&mut p.doc, &snapshot),
+            Ok(snapshot) => {
+                log::info!(
+                    "field: {} characters, cursor {}, selection {:?}",
+                    snapshot.text.chars().count(),
+                    snapshot.caret,
+                    snapshot.selection
+                );
+                sync_doc(&mut p.doc, &snapshot)
+            }
             Err(e) => log::warn!("reading the field: {e:#}"),
         }
     }
@@ -1466,6 +1474,7 @@ fn push_inline(p: &mut Popup, before: &str) {
         return;
     }
     let edits = crate::a11y::diff(before, p.doc.text(), p.doc.selection());
+    log::info!("field edits: {edits:?}");
     if let Err(e) = crate::a11y::write(field, edits) {
         log::warn!("writing to the field: {e:#}");
         p.notice = Some(format!("{e:#}"));

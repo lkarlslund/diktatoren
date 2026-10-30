@@ -181,7 +181,13 @@ async fn follow_focus(bus: Connection, focus: std::sync::Arc<std::sync::Mutex<Op
 }
 
 async fn proxy<'a>(bus: &'a Connection, t: &'a Target, interface: &'a str) -> zbus::Result<zbus::Proxy<'a>> {
-    zbus::Proxy::new(bus, t.bus.as_str(), t.path.as_str(), interface).await
+    zbus::proxy::Builder::new(bus)
+        .destination(t.bus.as_str())?
+        .path(t.path.as_str())?
+        .interface(interface)?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await
 }
 
 async fn editable_and_focused(bus: &Connection, t: &Target) -> bool {
@@ -237,10 +243,18 @@ fn search<'a>(
     })
 }
 
+/// Reads a property with a plain Properties.Get; Qt's bridge does not support the bulk lookup
+/// that cached proxies rely on.
+async fn property<T: TryFrom<OwnedValue>>(bus: &Connection, t: &Target, interface: &str, name: &str) -> Result<T> {
+    let properties = proxy(bus, t, "org.freedesktop.DBus.Properties").await?;
+    let value: OwnedValue = properties.call("Get", &(interface, name)).await?;
+    T::try_from(value).map_err(|_| anyhow!("unexpected type for {name}"))
+}
+
 async fn snapshot(bus: &Connection, t: &Target) -> Result<Snapshot> {
     let text_proxy = proxy(bus, t, TEXT).await?;
     let text: String = text_proxy.call("GetText", &(0i32, -1i32)).await?;
-    let caret: i32 = text_proxy.get_property("CaretOffset").await.unwrap_or(0);
+    let caret: i32 = property(bus, t, TEXT, "CaretOffset").await.context("reading the cursor position")?;
     let selections: i32 = text_proxy.call("GetNSelections", &()).await.unwrap_or(0);
     let selection = if selections > 0 {
         let (start, end): (i32, i32) = text_proxy.call("GetSelection", &(0i32,)).await?;
