@@ -44,9 +44,9 @@ Control a running instance:
   settings | quit
 
 Models and testing:
-  models                    list downloadable models (* = installed)
-  download <package-id>     download a model
-  transcribe <wav> [id]     transcribe a WAV file
+  models                    list downloadable wake-word models (* = installed)
+  download <package-id>     download a wake-word model
+  transcribe <wav>          transcribe a WAV file on the speech server
   listen [wav]              dictate in the terminal, from the microphone or a WAV file
   mic-test                  show the microphone level for a few seconds (records nothing)
 ";
@@ -73,9 +73,8 @@ fn main() -> Result<()> {
             download_package(&settings, id)
         }
         Some("transcribe") => {
-            let wav = args.get(1).context("usage: diktatoren transcribe <file.wav> [package-id]")?;
-            let package = args.get(2).cloned().unwrap_or(settings.asr_package.clone());
-            transcribe(&settings, Path::new(wav), &package)
+            let wav = args.get(1).context("usage: diktatoren transcribe <file.wav>")?;
+            transcribe(&settings, Path::new(wav))
         }
         Some("listen") => listen(settings, args.get(1)),
         Some("mic-test") => mic_test(&settings),
@@ -112,7 +111,7 @@ fn available_families() -> Result<Vec<String>> {
 fn list_models(settings: &Settings) -> Result<()> {
     let available = available_families()?;
     let dir = settings.models_dir();
-    for task in [Task::Asr, Task::WakeWord, Task::Vad] {
+    for task in [Task::WakeWord] {
         println!("== {}", task.spec_name());
         for family in catalog::families(task, &available) {
             println!("  {} ({}) [{}]", family.name, family.family, family.language_summary());
@@ -140,29 +139,15 @@ fn download_package(settings: &Settings, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn transcribe(settings: &Settings, wav: &Path, id: &str) -> Result<()> {
-    let (family, package) = catalog::find(id).with_context(|| format!("unknown package {id}"))?;
-    let dir = settings.models_dir();
-    if !package.is_installed(&dir) {
-        bail!("{id} is not installed; run `diktatoren download {id}`");
+fn transcribe(settings: &Settings, wav: &Path) -> Result<()> {
+    if !settings.uses_server() {
+        bail!("no speech server configured; set asr_server and asr_server_model");
     }
     let audio = audio::read_wav(wav)?;
-
-    let registry = audiocpp::Registry::new()?;
     let started = std::time::Instant::now();
-    let model = audiocpp::Model::load(&registry, &package.load_path(&dir), Some(&family.family))?;
-    let backend = audiocpp::Backend {
-        name: settings.backend.clone(),
-        device: 0,
-        threads: settings.threads(),
-    };
-    let mut session =
-        audiocpp::Session::new(&model, Task::Asr.token(), audiocpp::Mode::Offline, &backend, &[])?;
-    eprintln!("loaded in {:.2?}", started.elapsed());
-    let started = std::time::Instant::now();
-    let result = session.run(&audio, 16_000, &[])?;
+    let text = remote::transcribe(&settings.asr_server, &settings.asr_server_model, &settings.language, &audio)?;
     eprintln!("transcribed {:.1}s of audio in {:.2?}", audio.len() as f32 / 16_000.0, started.elapsed());
-    println!("{}", result.text.unwrap_or_default());
+    println!("{text}");
     Ok(())
 }
 

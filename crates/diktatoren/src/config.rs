@@ -57,15 +57,11 @@ pub struct Settings {
     pub wake_word_package: String,
     pub wake_phrase: String,
     pub wake_word_threshold: f32,
-    pub asr_package: String,
-    /// An audio.cpp server to recognise speech on instead of this computer, such as
-    /// `http://127.0.0.1:8099`. Empty means local.
+    /// The audio.cpp server that recognises speech, such as `http://127.0.0.1:8099`.
     pub asr_server: String,
     pub asr_server_model: String,
-    /// Language code passed to models that take one, or empty for the model default.
+    /// Language code sent with each request, or empty for the server model's default.
     pub language: String,
-    pub backend: String,
-    pub threads: u32,
     /// Silence that ends an utterance.
     pub utterance_silence_ms: u32,
     /// After a wake word, stop listening when nothing has been said for this long.
@@ -93,12 +89,9 @@ impl Default for Settings {
             wake_word_package: crate::wake::PHRASE.into(),
             wake_phrase: "Hey Diktatoren".into(),
             wake_word_threshold: 0.0,
-            asr_package: "parakeet_tdt_q8_0".into(),
             asr_server: String::new(),
             asr_server_model: String::new(),
             language: String::new(),
-            backend: "best".into(),
-            threads: 0,
             utterance_silence_ms: 700,
             wake_listen_timeout_s: 6,
             input_device: String::new(),
@@ -144,14 +137,6 @@ impl Settings {
     pub fn models_dir(&self) -> PathBuf {
         self.models_dir.clone().unwrap_or_else(default_models_dir)
     }
-
-    pub fn threads(&self) -> i32 {
-        if self.threads > 0 {
-            self.threads as i32
-        } else {
-            std::thread::available_parallelism().map_or(4, |n| n.get().min(8) as i32)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -165,6 +150,6 @@ mod tests {
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
         let partial: Settings = toml::from_str("hotkey = \"F9\"").unwrap();
         assert_eq!(partial.hotkey, "F9");
-        assert_eq!(partial.asr_package, settings.asr_package);
+        assert_eq!(partial.wake_phrase, settings.wake_phrase);
     }
 }

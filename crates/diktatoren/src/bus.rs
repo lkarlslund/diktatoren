@@ -28,8 +28,6 @@ pub enum BusEvent {
     Action(Action),
     DownloadProgress(String, Progress),
     DownloadFinished(String, Result<(), String>),
-    /// Sizes of repository files, keyed by repository and path.
-    RemoteSizes(Vec<(String, String, u64)>),
     /// Speech models offered by an audio.cpp server, or why they could not be listed.
     ServerModels(String, Result<Vec<String>, String>),
     /// A new restore token from the remote-desktop portal, to persist.

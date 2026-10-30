@@ -1,4 +1,4 @@
-//! Downloadable models, generated at build time from audio.cpp's model specs.
+//! Downloadable wake-word models, generated at build time from audio.cpp's model specs.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -9,7 +9,6 @@ use serde::Deserialize;
 pub struct Family {
     pub family: String,
     pub name: String,
-    pub description: String,
     pub tasks: Vec<String>,
     pub languages: Vec<String>,
     pub packages: Vec<Package>,
@@ -27,29 +26,21 @@ pub struct Package {
     pub revision: String,
 }
 
+/// What a downloadable model is for. Speech recognition happens on a server, so only
+/// wake-word models are downloaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Task {
-    Asr,
-    Vad,
     WakeWord,
 }
 
 impl Task {
     pub fn spec_name(self) -> &'static str {
-        match self {
-            Task::Asr => "asr",
-            Task::Vad => "vad",
-            Task::WakeWord => "wake_word",
-        }
+        "wake_word"
     }
 
     /// The C API task token.
     pub fn token(self) -> &'static str {
-        match self {
-            Task::Asr => "asr",
-            Task::Vad => "vad",
-            Task::WakeWord => "wake",
-        }
+        "wake"
     }
 }
 
@@ -129,12 +120,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_speech_and_wake_models() {
-        let (family, package) = find("parakeet_tdt_q8_0").expect("parakeet in catalog");
-        assert_eq!(family.family, "parakeet_tdt");
+    fn catalog_has_wake_models() {
+        let (family, package) = find("micro_wake_word_okay_nabu_f32").expect("microWakeWord in catalog");
+        assert_eq!(family.family, "micro_wake_word");
         let files = package.local_files();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].1, Path::new("Parakeet-TDT-0.6B-v3-GGUF/parakeet-tdt-0.6b-v3-q8_0.gguf"));
-        assert!(find("micro_wake_word_okay_nabu_f32").is_some());
+        assert_eq!(files[0].1, Path::new("MicroWakeWord-GGUF/micro-wake-word-okay-nabu-f32.gguf"));
+        assert!(find("parakeet_tdt_q8_0").is_none(), "speech models are not downloaded locally");
     }
 }

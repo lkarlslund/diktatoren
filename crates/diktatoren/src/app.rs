@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use iced::widget::{
@@ -13,7 +13,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Font, Length, Size, Subscription, Task, keyboard, window};
 
 use crate::bus::{self, Action, BusEvent};
-use crate::catalog::{self, Package, Task as ModelTask};
+use crate::catalog::{self, Task as ModelTask};
 use crate::commands;
 use crate::config::{FinishAction, HotkeyMode, InsertMethod, Settings};
 use crate::document::{Document, Outcome};
@@ -45,7 +45,6 @@ enum Finish {
 enum Tab {
     General,
     Speech,
-    Models,
     Output,
     Commands,
 }
@@ -75,23 +74,15 @@ enum SettingsMessage {
     WakeThreshold(f32),
     WakeTimeout(f32),
     Microphone(Choice),
-    AsrPackage(Choice),
     AsrServer(String),
     AsrServerModel(Choice),
     FetchServerModels,
-    Language(String),
-    Backend(String),
-    Threads(String),
-    Silence(f32),
     EnterAction(Choice),
     InsertMethod(Choice),
     PasteShortcut(String),
     RestoreClipboard(bool),
     VoiceCommands(bool),
     RequirePrefix(bool),
-    Download(String),
-    CancelDownload(String),
-    Remove(String),
     Save,
     Close,
 }
@@ -142,7 +133,6 @@ struct App {
     settings_window: Option<SettingsWindow>,
     available: Vec<String>,
     downloads: HashMap<String, (Progress, Arc<AtomicBool>)>,
-    sizes: HashMap<(String, String), u64>,
     status: String,
     listening: bool,
     level: f32,
@@ -163,7 +153,6 @@ impl App {
             settings_window: None,
             available,
             downloads: HashMap::new(),
-            sizes: HashMap::new(),
             status: "Starting…".into(),
             listening: false,
             level: 0.0,
@@ -200,12 +189,10 @@ impl App {
                 self.hotkeys = Some(hotkeys);
                 #[cfg(target_os = "linux")]
                 crate::portal::set_restore_token(self.settings.portal_restore_token.clone());
-                let first_run = !self.settings.uses_server()
-                    && catalog::find(&self.settings.asr_package)
-                        .is_none_or(|(_, p)| !p.is_installed(&self.settings.models_dir()));
+                let first_run = !self.settings.uses_server();
                 let mut tasks = Vec::new();
                 if first_run {
-                    tasks.push(self.open_settings(Tab::Models));
+                    tasks.push(self.open_settings(Tab::Speech));
                 }
                 if let Some(action) = initial {
                     tasks.push(self.action(action));
@@ -293,20 +280,6 @@ impl App {
                 self.downloads.remove(&id);
                 match result {
                     Ok(()) => {
-                        // Use the first speech model downloaded, and load what is configured.
-                        let installed = |pkg: &str| {
-                            catalog::find(pkg).is_some_and(|(_, p)| p.is_installed(&self.settings.models_dir()))
-                        };
-                        if let Some((family, _)) = catalog::find(&id)
-                            && family.tasks.iter().any(|t| t == "asr")
-                            && !installed(&self.settings.asr_package)
-                        {
-                            self.settings.asr_package = id.clone();
-                            if let Some(w) = &mut self.settings_window {
-                                w.draft.asr_package = id.clone();
-                            }
-                            let _ = self.settings.save();
-                        }
                         self.engine.send(EngineCommand::Configure(Box::new(self.settings.clone())));
                     }
                     Err(e) => self.status = format!("Download failed: {e}"),
@@ -324,12 +297,6 @@ impl App {
                         w.draft.asr_server_model = first.clone();
                     }
                     w.server_models = models;
-                }
-                Task::none()
-            }
-            BusEvent::RemoteSizes(sizes) => {
-                for (repo, path, size) in sizes {
-                    self.sizes.insert((repo, path), size);
                 }
                 Task::none()
             }
@@ -542,9 +509,6 @@ impl App {
             server_models: Ok(Vec::new()),
         });
         fetch_server_models(&self.settings.asr_server);
-        if self.sizes.is_empty() {
-            fetch_sizes();
-        }
         open.then(window::gain_focus)
     }
 
@@ -557,22 +521,24 @@ impl App {
             M::Hotkey(s) => d.hotkey = s,
             M::HotkeyMode(m) => d.hotkey_mode = m,
             M::WakeEnabled(on) => d.wake_word_enabled = on,
-            M::WakePackage(c) => d.wake_word_package = c.id,
+            M::WakePackage(c) => {
+                let needs_download = catalog::find(&c.id)
+                    .is_some_and(|(_, p)| !p.is_installed(&self.settings.models_dir()));
+                d.wake_word_package = c.id.clone();
+                if needs_download {
+                    self.start_download(&c.id);
+                }
+            }
             M::WakePhrase(s) => d.wake_phrase = s,
             M::WakeThreshold(t) => d.wake_word_threshold = t,
             M::WakeTimeout(t) => d.wake_listen_timeout_s = t as u32,
             M::Microphone(c) => d.input_device = c.id,
-            M::AsrPackage(c) => d.asr_package = c.id,
             M::AsrServer(url) => d.asr_server = url,
             M::AsrServerModel(c) => d.asr_server_model = c.id,
             M::FetchServerModels => {
                 w.server_models = Ok(Vec::new());
                 fetch_server_models(&d.asr_server);
             }
-            M::Language(s) => d.language = s.trim().to_string(),
-            M::Backend(s) => d.backend = s,
-            M::Threads(s) => d.threads = s.trim().parse().unwrap_or(0),
-            M::Silence(ms) => d.utterance_silence_ms = ms as u32,
             M::EnterAction(c) => {
                 d.enter_action = if c.id == "copy" { FinishAction::Copy } else { FinishAction::Insert }
             }
@@ -583,18 +549,6 @@ impl App {
             M::RestoreClipboard(on) => d.restore_clipboard = on,
             M::VoiceCommands(on) => d.voice_commands = on,
             M::RequirePrefix(on) => d.require_command_prefix = on,
-            M::Download(id) => self.start_download(&id),
-            M::CancelDownload(id) => {
-                if let Some((_, cancel)) = self.downloads.get(&id) {
-                    cancel.store(true, Ordering::Relaxed);
-                }
-            }
-            M::Remove(id) => {
-                if let Some((_, package)) = catalog::find(&id)
-                    && let Err(e) = download::remove(package, &self.settings.models_dir()) {
-                        self.status = format!("{e:#}");
-                    }
-            }
             M::Save => {
                 let hotkey_changed = d.hotkey != self.settings.hotkey;
                 self.settings = d.clone();
@@ -727,7 +681,6 @@ impl App {
         let tabs = row![
             tab_button("General", Tab::General),
             tab_button("Speech", Tab::Speech),
-            tab_button("Models", Tab::Models),
             tab_button("Output", Tab::Output),
             tab_button("Voice commands", Tab::Commands),
         ]
@@ -736,7 +689,6 @@ impl App {
         let page = match w.tab {
             Tab::General => self.general_page(w),
             Tab::Speech => self.speech_page(w),
-            Tab::Models => self.models_page(),
             Tab::Output => output_page(&w.draft),
             Tab::Commands => commands_page(&w.draft),
         };
@@ -769,7 +721,7 @@ impl App {
             "For example Ctrl+Alt+Space, Super+D or F9."
         };
         let mut wake_packages = vec![choice(wake::PHRASE, "Spoken phrase (your own words)")];
-        wake_packages.extend(self.installed_choices(ModelTask::WakeWord));
+        wake_packages.extend(self.wake_choices());
         let wake_selected = wake_packages.iter().find(|c| c.id == d.wake_word_package).cloned();
         let phrase_mode = d.wake_word_package == wake::PHRASE;
         let sensitivity: Element<'_, SettingsMessage> = if phrase_mode {
@@ -807,12 +759,18 @@ impl App {
             if phrase_mode {
                 column![
                     labeled("Phrase", text_input("Hey Diktatoren", &d.wake_phrase).on_input(M::WakePhrase).width(320)),
-                    hint("Say the phrase on its own, or go straight on: “Hey Diktatoren, remind me to …”. While waiting, short utterances are recognised on this computer with your speech model, compared with the phrase and discarded."),
+                    hint("Say the phrase on its own, or go straight on: “Hey Diktatoren, remind me to …”. While waiting, short utterances go to your speech server, are compared with the phrase, and are discarded."),
                 ]
                 .spacing(10)
                 .into()
+            } else if let Some((progress, _)) = self.downloads.get(&d.wake_word_package) {
+                let fraction = progress.total.map_or(0.0, |t| progress.done as f32 / t.max(1) as f32);
+                row![text("Downloading…").size(13), progress_bar(0.0..=1.0, fraction).length(Length::Fixed(200.0)).girth(6)]
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+                    .into()
             } else {
-                hint::<SettingsMessage>("Wake-word models listen for one fixed phrase and use very little power. Download them under Models.")
+                hint::<SettingsMessage>("A wake-word model listens for one fixed phrase on this computer and uses very little power.")
             },
             sensitivity,
             labeled(
@@ -834,142 +792,57 @@ impl App {
     fn speech_page<'a>(&'a self, w: &'a SettingsWindow) -> Element<'a, SettingsMessage> {
         use SettingsMessage as M;
         let d = &w.draft;
-        let models = self.installed_choices(ModelTask::Asr);
-        let selected = models.iter().find(|c| c.id == d.asr_package).cloned();
-        let languages = catalog::find(&d.asr_package)
-            .map(|(f, _)| f.language_summary())
-            .unwrap_or_default();
-        let backends = ["best", "cpu", "cuda", "vulkan", "metal"].map(String::from).to_vec();
-        let server_models: Vec<Choice> = match &w.server_models {
+        let models: Vec<Choice> = match &w.server_models {
             Ok(list) => list.iter().map(|m| choice(m, m)).collect(),
             Err(_) => Vec::new(),
         };
-        let server_selected = server_models.iter().find(|c| c.id == d.asr_server_model).cloned();
-        let server_status = match &w.server_models {
-            _ if d.asr_server.trim().is_empty() => String::new(),
-            Ok(list) if list.is_empty() => "No speech models listed yet; press Connect.".into(),
-            Ok(list) => format!("{} speech model{} available.", list.len(), if list.len() == 1 { "" } else { "s" }),
+        let selected = models.iter().find(|c| c.id == d.asr_server_model).cloned();
+        let status = match &w.server_models {
+            _ if d.asr_server.trim().is_empty() => {
+                "The address of an audio.cpp server (audiocpp_server), such as http://127.0.0.1:8099.".to_string()
+            }
+            Ok(list) if list.is_empty() => "Press Connect to list the server's speech models.".into(),
+            Ok(_) => "Connected.".into(),
             Err(e) => e.clone(),
         };
+        let connect = (!d.asr_server.trim().is_empty()).then_some(M::FetchServerModels);
         column![
-            section("Server"),
+            section("Speech recognition"),
             labeled(
-                "audio.cpp server",
+                "Server",
                 row![
-                    text_input("empty: recognise on this computer", &d.asr_server)
+                    text_input("http://127.0.0.1:8099", &d.asr_server)
                         .on_input(M::AsrServer)
+                        .on_submit_maybe(connect.clone())
                         .width(300),
-                    button("Connect")
-                        .on_press_maybe((!d.asr_server.trim().is_empty()).then_some(M::FetchServerModels))
-                        .style(button::secondary),
+                    button("Connect").on_press_maybe(connect).style(button::secondary),
                 ]
                 .spacing(8),
             ),
             labeled(
-                "Server model",
-                pick_list(server_models, server_selected, M::AsrServerModel)
-                    .placeholder("Connect to list models")
-                    .width(300),
+                "Model",
+                pick_list(models, selected, M::AsrServerModel).placeholder("Connect first").width(300),
             ),
-            hint(if server_status.is_empty() {
-                "Recognise speech on an audio.cpp server (audiocpp_server), such as http://127.0.0.1:8099, to use models it hosts on its GPU. Wake words and voice detection still run here.".to_string()
-            } else {
-                server_status
-            }),
-            section("On this computer"),
-            labeled(
-                "Speech model",
-                pick_list(models, selected, M::AsrPackage).placeholder("Download one under Models").width(360),
-            ),
-            hint(if languages.is_empty() { String::new() } else { format!("Languages: {languages}") }),
-            labeled("Language", text_input("model default", &d.language).on_input(M::Language).width(160)),
-            hint("A code such as da or en, for models that take one. Leave empty to let the model decide."),
-            labeled(
-                "End utterance after",
-                row![
-                    slider(300.0_f32..=2000.0_f32, d.utterance_silence_ms as f32, M::Silence).step(50.0_f32).width(200),
-                    text(format!("{} ms of silence", d.utterance_silence_ms)).size(13)
-                ]
-                .spacing(10),
-            ),
-            section("Performance"),
-            labeled("Compute", pick_list(backends, Some(d.backend.clone()), M::Backend).width(160)),
-            hint("best picks the GPU when this build supports one."),
-            labeled(
-                "CPU threads",
-                text_input("auto", &if d.threads == 0 { String::new() } else { d.threads.to_string() })
-                    .on_input(M::Threads)
-                    .width(100),
-            ),
+            hint(status),
         ]
         .spacing(10)
         .into()
     }
 
-    fn models_page(&self) -> Element<'_, SettingsMessage> {
+    /// Wake-word models this build can run; ones not yet downloaded download when chosen.
+    fn wake_choices(&self) -> Vec<Choice> {
         let dir = self.settings.models_dir();
-        let mut page = column![hint(format!("Models are stored in {}", dir.display()))].spacing(10);
-        for (task, title) in [(ModelTask::Asr, "Speech recognition"), (ModelTask::WakeWord, "Wake words")] {
-            page = page.push(section(title));
-            for family in catalog::families(task, &self.available) {
-                let mut block = column![
-                    row![
-                        text(&family.name).size(16),
-                        text(family.language_summary()).size(13),
-                    ]
-                    .spacing(10)
-                    .align_y(Alignment::End),
-                    hint(&family.description),
-                ]
-                .spacing(4);
-                for package in &family.packages {
-                    block = block.push(self.package_row(package, &dir));
-                }
-                page = page.push(container(block).padding(8).style(container::rounded_box));
-            }
-        }
-        page.into()
-    }
-
-    fn package_row<'a>(&'a self, package: &'a Package, dir: &std::path::Path) -> Element<'a, SettingsMessage> {
-        use SettingsMessage as M;
-        let size: Option<u64> = package
-            .files
-            .iter()
-            .map(|f| self.sizes.get(&(package.repo.clone(), f.clone())).copied())
-            .sum();
-        let in_use = package.id == self.settings.asr_package
-            || (self.settings.wake_word_enabled && package.id == self.settings.wake_word_package);
-        let mut r = row![
-            text(&package.name).size(14).width(Length::Fill),
-            text(size.map(download::human_size).unwrap_or_default()).size(13).width(80),
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center);
-        if let Some((progress, _)) = self.downloads.get(&package.id) {
-            let fraction = progress.total.map_or(0.0, |t| progress.done as f32 / t.max(1) as f32);
-            r = r
-                .push(progress_bar(0.0..=1.0, fraction).length(Length::Fixed(140.0)).girth(8))
-                .push(button("Cancel").on_press(M::CancelDownload(package.id.clone())).style(button::secondary));
-        } else if package.is_installed(dir) {
-            r = r.push(text(if in_use { "In use" } else { "Installed" }).size(13).width(70)).push(
-                button("Remove")
-                    .on_press_maybe((!in_use).then(|| M::Remove(package.id.clone())))
-                    .style(button::danger),
-            );
-        } else {
-            r = r.push(button("Download").on_press(M::Download(package.id.clone())));
-        }
-        r.into()
-    }
-
-    fn installed_choices(&self, task: ModelTask) -> Vec<Choice> {
-        let dir = self.settings.models_dir();
-        catalog::families(task, &self.available)
+        catalog::families(ModelTask::WakeWord, &self.available)
             .into_iter()
             .flat_map(|f| f.packages.iter())
-            .filter(|p| p.is_installed(&dir))
-            .map(|p| choice(&p.id, &p.name))
+            .map(|p| {
+                let name = p.name.trim_end_matches(" GGUF F32").to_string();
+                if p.is_installed(&dir) {
+                    choice(&p.id, &name)
+                } else {
+                    choice(&p.id, &format!("{name} (downloads when chosen)"))
+                }
+            })
             .collect()
     }
 }
@@ -1115,31 +988,6 @@ fn fetch_server_models(url: &str) {
     std::thread::spawn(move || {
         let models = crate::remote::asr_models(&url).map_err(|e| format!("{e:#}"));
         bus::send(BusEvent::ServerModels(url, models));
-    });
-}
-
-/// Looks up file sizes for the models page in the background.
-fn fetch_sizes() {
-    std::thread::spawn(|| {
-        let mut repos: Vec<(String, String)> = catalog::all()
-            .iter()
-            .flat_map(|f| f.packages.iter().map(|p| (p.repo.clone(), p.revision.clone())))
-            .collect();
-        repos.sort();
-        repos.dedup();
-        let mut sizes = Vec::new();
-        for (repo, revision) in repos {
-            let url = format!("https://huggingface.co/api/models/{repo}/tree/{revision}?recursive=true");
-            let Ok(response) = ureq::get(&url).call() else { continue };
-            let Ok(body) = response.into_body().read_to_string() else { continue };
-            let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else { continue };
-            for e in entries {
-                if let (Some(path), Some(size)) = (e["path"].as_str(), e["size"].as_u64()) {
-                    sizes.push((repo.clone(), path.to_string(), size));
-                }
-            }
-        }
-        bus::send(BusEvent::RemoteSizes(sizes));
     });
 }
 

@@ -95,21 +95,6 @@ pub fn install(
     Ok(())
 }
 
-/// Deletes the package's files and its directory when that leaves it empty.
-pub fn remove(package: &Package, models_dir: &Path) -> Result<()> {
-    for (_, local) in package.local_files() {
-        let path = models_dir.join(local);
-        if path.exists() {
-            fs::remove_file(&path)?;
-        }
-    }
-    let dir = models_dir.join(&package.directory);
-    if fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_none()) {
-        let _ = fs::remove_dir(&dir);
-    }
-    Ok(())
-}
-
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut value = bytes as f64;

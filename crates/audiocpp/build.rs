@@ -8,9 +8,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The speech recognition, voice activity and wake-word families Diktatoren offers.
-const DEFAULT_MODELS: &str = "parakeet_tdt,hviske_asr_v6,nemotron_asr,moonshine_asr,qwen3_asr,\
-crisperwhisper,canary_asr,cohere_asr,micro_wake_word,open_wake_word,firered_vad";
+/// The wake-word families Diktatoren offers. Silero VAD is part of every build, and speech
+/// recognition runs on an audio.cpp server.
+const DEFAULT_MODELS: &str = "micro_wake_word,open_wake_word";
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

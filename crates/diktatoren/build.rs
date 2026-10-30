@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-const TASKS: [&str; 3] = ["asr", "vad", "wake_word"];
+const TASKS: [&str; 1] = ["wake_word"];
 
 fn main() {
     let source = PathBuf::from(env::var("DEP_AUDIOCPP_SOURCE_DIR").expect("audiocpp source dir"));
@@ -84,7 +84,6 @@ fn catalog(specs: &Path) -> Value {
         families.push(json!({
             "family": spec["family"],
             "name": if spec["display_name"].is_string() { &spec["display_name"] } else { &spec["family"] },
-            "description": spec["description"].as_str().unwrap_or_default(),
             "tasks": tasks,
             "languages": spec["languages"],
             "packages": packages,

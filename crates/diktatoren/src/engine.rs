@@ -337,47 +337,18 @@ impl Engine {
     fn reload_recogniser(&mut self) {
         let settings = self.loaded.as_ref().unwrap().settings.clone();
         if let Some(r) = &self.recogniser
-            && r.settings.asr_package == settings.asr_package
             && r.settings.asr_server == settings.asr_server
             && r.settings.asr_server_model == settings.asr_server_model
-            && r.settings.backend == settings.backend
-            && r.settings.threads == settings.threads
             && r.settings.language == settings.language
         {
             return;
         }
         self.recogniser = None;
-        let (source, name) = if settings.uses_server() {
-            let model = settings.asr_server_model.clone();
-            let name = format!("{model} on {}", settings.asr_server.trim());
-            (Source::Server { url: settings.asr_server.trim().to_string(), model }, name)
-        } else {
-            let Some((family, package)) = catalog::find(&settings.asr_package) else {
-                self.emit(Event::Error(format!("unknown speech model {}", settings.asr_package)));
-                return;
-            };
-            let dir = settings.models_dir();
-            if !package.is_installed(&dir) {
-                self.emit(Event::Error(format!(
-                    "speech model {} is not downloaded; open Settings → Models",
-                    package.name
-                )));
-                return;
-            }
-            let source = Source::Local {
-                path: package.load_path(&dir),
-                family: family.family.clone(),
-                backend: backend(&settings),
-            };
-            (source, package.name.clone())
-        };
-        self.recogniser = Some(Recogniser::spawn(
-            settings,
-            source,
-            name,
-            self.sink.clone(),
-            self.commands.clone(),
-        ));
+        if !settings.uses_server() {
+            self.emit(Event::Error("Choose a speech server in Settings → Speech.".into()));
+            return;
+        }
+        self.recogniser = Some(Recogniser::spawn(settings, self.sink.clone(), self.commands.clone()));
     }
 
     fn wake_active(&self) -> bool {
@@ -631,66 +602,30 @@ impl Engine {
     }
 }
 
-/// Detection models are tiny; they stay on the CPU so they never compete with recognition.
+/// Detection models are tiny and run on the CPU.
 fn cpu() -> Backend {
     Backend { name: "cpu".into(), device: 0, threads: 1 }
 }
 
-fn backend(settings: &Settings) -> Backend {
-    Backend { name: settings.backend.clone(), device: 0, threads: settings.threads() }
-}
-
-/// Where speech is recognised.
-enum Source {
-    Local { path: PathBuf, family: String, backend: Backend },
-    Server { url: String, model: String },
-}
-
-enum Asr {
-    Local { session: Session, language_option: Option<String>, _model: Model },
-    Server { url: String, model: String, language: String },
+/// The speech server and model that recognise utterances.
+struct Asr {
+    url: String,
+    model: String,
+    language: String,
 }
 
 impl Asr {
-    fn open(source: Source, language: &str, name: &str) -> Result<Self> {
-        match source {
-            Source::Server { url, model } => {
-                // Fail early with a clear message when the server is down or lacks the model.
-                let models = remote::asr_models(&url)?;
-                if !models.contains(&model) {
-                    return Err(anyhow!("{url} has no speech model {model:?} (it has: {})", models.join(", ")));
-                }
-                Ok(Asr::Server { url, model, language: language.to_string() })
-            }
-            Source::Local { path, family, backend } => {
-                let registry = Registry::new()?;
-                let model = Model::load(&registry, &path, Some(&family))
-                    .with_context(|| format!("loading {name}"))?;
-                let session = Session::new(&model, Task::Asr.token(), Mode::Offline, &backend, &[])
-                    .or_else(|e| {
-                        if backend.name == "cpu" {
-                            return Err(e);
-                        }
-                        log::warn!("{} backend failed ({e}); using cpu", backend.name);
-                        let cpu = Backend { name: "cpu".into(), ..backend.clone() };
-                        Session::new(&model, Task::Asr.token(), Mode::Offline, &cpu, &[])
-                    })?;
-                let language_option = (!language.is_empty() && model.has_request_option("language"))
-                    .then(|| language.to_string());
-                Ok(Asr::Local { session, language_option, _model: model })
-            }
+    /// Fails early with a clear message when the server is down or lacks the model.
+    fn open(url: String, model: String, language: &str) -> Result<Self> {
+        let models = remote::asr_models(&url)?;
+        if !models.contains(&model) {
+            return Err(anyhow!("{url} has no speech model {model:?} (it has: {})", models.join(", ")));
         }
+        Ok(Asr { url, model, language: language.to_string() })
     }
 
     fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
-        match self {
-            Asr::Local { session, language_option, .. } => {
-                let options: Vec<(&str, &str)> =
-                    language_option.iter().map(|l| ("language", l.as_str())).collect();
-                Ok(session.run(samples, RATE, &options)?.text.unwrap_or_default())
-            }
-            Asr::Server { url, model, language } => remote::transcribe(url, model, language, samples),
-        }
+        remote::transcribe(&self.url, &self.model, &self.language, samples)
     }
 }
 
@@ -718,24 +653,19 @@ struct Recogniser {
 }
 
 impl Recogniser {
-    fn spawn(
-        settings: Settings,
-        source: Source,
-        name: String,
-        sink: Sink,
-        commands: mpsc::Sender<Command>,
-    ) -> Self {
+    fn spawn(settings: Settings, sink: Sink, commands: mpsc::Sender<Command>) -> Self {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let worker_queue = queue.clone();
         let language = settings.language.clone();
-        // A preview re-sends the whole utterance each time; too much for a shared server.
-        let previews = matches!(source, Source::Local { .. });
+        let url = settings.asr_server.trim().to_string();
+        let model = settings.asr_server_model.trim().to_string();
+        let name = format!("{model} on {url}");
         thread::Builder::new()
             .name("recogniser".into())
             .spawn(move || {
-                sink(Event::Status(format!("Loading {name}…")));
+                sink(Event::Status(format!("Connecting to {name}…")));
                 let started = Instant::now();
-                let mut asr = match Asr::open(source, &language, &name) {
+                let mut asr = match Asr::open(url, model, &language) {
                     Ok(a) => a,
                     Err(e) => {
                         sink(Event::Error(format!("{e:#}")));
@@ -803,7 +733,8 @@ impl Recogniser {
                 }
             })
             .expect("spawning recogniser");
-        Recogniser { settings, queue, previews }
+        // A preview re-sends the whole utterance each time; too much for a shared server.
+        Recogniser { settings, queue, previews: false }
     }
 
     fn submit(&self, job: Job) {
