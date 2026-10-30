@@ -462,6 +462,15 @@ impl Engine {
         if let Some(start) = listening.speech_start.take() {
             self.finish_utterance(&listening.audio, start, listening.audio.len());
         }
+        // Keep the microphone audio for replaying while debugging, but not replays themselves.
+        if self.settings().is_some_and(|s| s.record_sessions) && self.input_override.is_none() {
+            let audio = std::mem::take(&mut listening.audio);
+            thread::spawn(move || {
+                if let Err(e) = crate::recordings::save(&audio) {
+                    log::warn!("saving the recording: {e:#}");
+                }
+            });
+        }
         if let Some(l) = self.loaded.as_mut() {
             let _ = l.vad.stream_finish();
         }

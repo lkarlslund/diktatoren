@@ -86,6 +86,8 @@ pub struct Settings {
     /// The edited phrase lists when `command_language` is custom, keyed by command.
     pub command_phrases: BTreeMap<String, String>,
     pub models_dir: Option<PathBuf>,
+    /// Save each listening period's microphone audio for replaying with `diktatoren feed`.
+    pub record_sessions: bool,
     /// Lets the Wayland remote-desktop portal skip its permission prompt after the first use.
     pub portal_restore_token: Option<String>,
 }
@@ -119,6 +121,7 @@ impl Default for Settings {
             command_language: Language::from_locale(),
             command_phrases: BTreeMap::new(),
             models_dir: None,
+            record_sessions: false,
             portal_restore_token: None,
         }
     }

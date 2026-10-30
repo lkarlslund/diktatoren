@@ -30,6 +30,7 @@ mod output;
 #[cfg(target_os = "linux")]
 mod portal;
 mod remote;
+mod recordings;
 mod resample;
 mod theme;
 mod tray;
