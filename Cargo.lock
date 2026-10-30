@@ -981,6 +981,7 @@ dependencies = [
  "env_logger",
  "futures",
  "global-hotkey",
+ "hound",
  "iced",
  "interprocess",
  "ksni",
