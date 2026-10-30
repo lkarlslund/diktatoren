@@ -17,7 +17,7 @@ complain() { echo "check-tree: $*" >&2; fail=1; }
 allowed_binary='^(assets/icons/.*\.(png|ico|icns))$'
 forbidden_ext='\.(gguf|safetensors|onnx|tflite|bin|wav|mp3|flac|ogg|opus|m4a|so|dylib|dll|exe|lib|a|o|pdb|zip|tar|gz|7z)$'
 # Contact addresses that may legitimately appear in the tree.
-allowed_email='^(noreply@github\.com|.*@users\.noreply\.github\.com|lars@karlslund\.dk)$'
+allowed_email='^(noreply@github\.com|.*@users\.noreply\.github\.com)$'
 
 for f in "${files[@]}"; do
     [[ -f "$f" ]] || continue
