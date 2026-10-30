@@ -1065,7 +1065,7 @@ fn window_icon() -> Option<window::Icon> {
 fn platform_specific() -> window::settings::PlatformSpecific {
     #[cfg(target_os = "linux")]
     return window::settings::PlatformSpecific {
-        application_id: "diktatoren".into(),
+        application_id: crate::desktop::APP_ID.into(),
         ..Default::default()
     };
     #[cfg(not(target_os = "linux"))]

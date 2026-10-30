@@ -9,6 +9,8 @@ mod bus;
 mod catalog;
 mod commands;
 mod config;
+#[cfg(target_os = "linux")]
+mod desktop;
 mod document;
 mod download;
 mod engine;
@@ -91,6 +93,8 @@ fn run_app(settings: Settings, action: Option<bus::Action>, command: &str) -> Re
     if action == Some(bus::Action::Quit) {
         return Ok(());
     }
+    #[cfg(target_os = "linux")]
+    desktop::ensure_entry();
     if let Err(e) = ipc::serve() {
         log::warn!("control socket unavailable: {e:#}");
     }

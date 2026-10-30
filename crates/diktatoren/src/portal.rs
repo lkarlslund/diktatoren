@@ -71,6 +71,15 @@ struct Keyboard {
 }
 
 async fn run(mut rx: mpsc::UnboundedReceiver<Request>) {
+    // Unsandboxed apps must name themselves before the portal serves them.
+    match crate::desktop::APP_ID.parse() {
+        Ok(app_id) => {
+            if let Err(e) = ashpd::register_host_app(app_id).await {
+                log::warn!("registering with the portal: {e}");
+            }
+        }
+        Err(e) => log::warn!("invalid app id: {e}"),
+    }
     let mut shortcuts: Option<(GlobalShortcuts, Session<GlobalShortcuts>)> = None;
     let mut keyboard: Option<Keyboard> = None;
     let mut restore_token: Option<String> = None;
