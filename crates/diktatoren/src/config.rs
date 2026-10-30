@@ -59,6 +59,9 @@ pub struct Settings {
     /// A wake-word model package, or "phrase" for `wake_phrase`.
     pub wake_word_package: String,
     pub wake_phrase: String,
+    /// Spellings of the wake phrase learned by training, and the tolerance it settled on.
+    pub wake_variants: Vec<String>,
+    pub wake_tolerance: Option<u32>,
     pub wake_word_threshold: f32,
     /// The audio.cpp server that recognises speech, such as `http://127.0.0.1:8099`.
     pub asr_server: String,
@@ -92,6 +95,8 @@ impl Default for Settings {
             wake_word_enabled: false,
             wake_word_package: crate::wake::PHRASE.into(),
             wake_phrase: "Hey Diktatoren".into(),
+            wake_variants: Vec::new(),
+            wake_tolerance: None,
             wake_word_threshold: 0.0,
             asr_server: String::new(),
             asr_server_model: String::new(),

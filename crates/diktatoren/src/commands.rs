@@ -28,6 +28,8 @@ pub enum Command {
     Copy,
     Cancel,
     StopListening,
+    /// Start listening again after a pause.
+    Resume,
     EditMode,
     DictateMode,
     NewLine,
@@ -113,7 +115,8 @@ pub fn specs() -> Vec<Spec> {
         fixed("insert", "Insert into the window", true, Insert, "insert, insert it, paste, paste it", "indsæt, sæt ind, indsæt teksten"),
         fixed("copy", "Copy to the clipboard", true, Copy, "copy, copy it, copy that", "kopiér, kopier, kopiér det, kopier teksten"),
         fixed("cancel", "Cancel", true, Cancel, "cancel, cancel that, never mind", "annuller, annullér, afbryd, glem det"),
-        fixed("pause", "Stop listening", true, StopListening, "pause, stop listening", "pause, stop med at lytte, hold pause"),
+        fixed("pause", "Stop listening", true, StopListening, "pause, stop listening, microphone off", "pause, stop med at lytte, hold pause, mikrofon fra"),
+        fixed("resume", "Listen again (while paused)", true, Resume, "listen, resume, start listening, microphone on", "lyt, lyd, lyt igen, fortsæt, mikrofon til"),
         fixed("edit_mode", "Switch to Edit mode", true, EditMode, "edit, edit mode, editing", "redigér, rediger, redigering"),
         fixed("dictate_mode", "Switch to Dictate mode", true, DictateMode, "dictate, dictation, dictate mode", "diktér, dikter, diktat"),
         fixed("new_line", "New line", true, NewLine, "new line, line break, next line", "ny linje, linjeskift, næste linje"),
@@ -142,6 +145,13 @@ pub fn specs() -> Vec<Spec> {
 }
 
 /// The phrases of a preset language, keyed by [`Spec::key`].
+impl Grammar {
+    /// The first phrase that triggers `key`, for showing to the user.
+    pub fn first_phrase(&self, command: &Command) -> Option<&str> {
+        self.fixed.iter().find(|(_, c, _)| c == command)?.0.first().map(String::as_str)
+    }
+}
+
 pub fn preset(language: Language) -> BTreeMap<String, String> {
     specs()
         .into_iter()

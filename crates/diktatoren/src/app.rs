@@ -234,7 +234,7 @@ impl App {
             }
             Message::ToggleListening => {
                 if self.listening {
-                    self.engine.send(EngineCommand::StopListening);
+                    self.engine.send(EngineCommand::StopListening("Pause button"));
                 } else {
                     self.engine.send(EngineCommand::Listen { from_wake: false });
                 }
@@ -249,7 +249,8 @@ impl App {
             Message::WindowClosed(id) => {
                 if self.popup.as_ref().is_some_and(|p| p.id == id) {
                     self.popup = None;
-                    self.engine.send(EngineCommand::StopListening);
+                    self.engine.send(EngineCommand::Standby(false));
+                    self.engine.send(EngineCommand::StopListening("window closed"));
                 }
                 if self.settings_window.as_ref().is_some_and(|s| s.id == id) {
                     self.settings_window = None;
@@ -298,7 +299,7 @@ impl App {
             BusEvent::HotkeyReleased => {
                 log::info!("hotkey released");
                 if self.settings.hotkey_mode == HotkeyMode::PushToTalk {
-                    self.engine.send(EngineCommand::StopListening);
+                    self.engine.send(EngineCommand::StopListening("push-to-talk key released"));
                 }
                 Task::none()
             }
@@ -382,6 +383,7 @@ impl App {
                 }
             }
             engine::Event::Utterance(utterance) => return self.utterance(utterance),
+            engine::Event::Overheard(heard) => return self.overheard(heard),
             engine::Event::Ready { asr } => self.status = format!("Ready · {asr}"),
             engine::Event::Status(s) => self.status = s,
             engine::Event::Error(e) => {
@@ -435,10 +437,33 @@ impl App {
             Outcome::Copy => self.finish(Finish::Copy),
             Outcome::Cancel => self.finish(Finish::Cancel),
             Outcome::StopListening => {
-                self.engine.send(EngineCommand::StopListening);
+                self.engine.send(EngineCommand::StopListening("voice command"));
+                Task::none()
+            }
+            Outcome::Resume => {
+                self.engine.send(EngineCommand::Listen { from_wake: false });
                 Task::none()
             }
             Outcome::Edited | Outcome::NotFound | Outcome::SwitchMode(_) => Task::none(),
+        }
+    }
+
+    /// Speech heard while paused: only resuming and finishing act on it.
+    fn overheard(&mut self, heard: String) -> Task<Message> {
+        if self.popup.is_none() || self.listening || !self.settings.voice_commands {
+            return Task::none();
+        }
+        let command = self.grammar.parse(&heard, Mode::Dictate);
+        log::info!("paused: {heard:?} → {command:?}");
+        match command {
+            Some(commands::Command::Resume) => {
+                self.engine.send(EngineCommand::Listen { from_wake: false });
+                Task::none()
+            }
+            Some(commands::Command::Insert) => self.finish(Finish::Insert),
+            Some(commands::Command::Copy) => self.finish(Finish::Copy),
+            Some(commands::Command::Cancel) => self.finish(Finish::Cancel),
+            _ => Task::none(),
         }
     }
 
@@ -449,7 +474,7 @@ impl App {
                     self.engine.send(EngineCommand::Listen { from_wake: false });
                     self.open_popup()
                 } else if self.listening {
-                    self.engine.send(EngineCommand::StopListening);
+                    self.engine.send(EngineCommand::StopListening("hotkey"));
                     Task::none()
                 } else {
                     self.engine.send(EngineCommand::Listen { from_wake: false });
@@ -461,7 +486,7 @@ impl App {
                 if self.popup.is_none() { self.open_popup() } else { self.focus_popup() }
             }
             Action::Stop => {
-                self.engine.send(EngineCommand::StopListening);
+                self.engine.send(EngineCommand::StopListening("stop command"));
                 Task::none()
             }
             Action::Insert => self.finish(Finish::Insert),
@@ -481,6 +506,7 @@ impl App {
         }
         let target = Target::capture();
         log::info!("dictation window opened");
+        self.engine.send(EngineCommand::Standby(true));
         let (id, open) = window::open(window::Settings {
             size: Size::new(640.0, 280.0),
             min_size: Some(Size::new(360.0, 180.0)),
@@ -514,8 +540,9 @@ impl App {
 
     fn finish(&mut self, finish: Finish) -> Task<Message> {
         let Some(popup) = self.popup.take() else { return Task::none() };
+        self.engine.send(EngineCommand::Standby(false));
         log::info!("finished with {finish:?}: {} characters", popup.doc.text().trim().chars().count());
-        self.engine.send(EngineCommand::StopListening);
+        self.engine.send(EngineCommand::StopListening("finished"));
         let close = window::close(popup.id);
         let text = popup.doc.text().trim().to_string();
         if finish == Finish::Cancel || text.is_empty() {
@@ -704,7 +731,14 @@ impl App {
                 }
             });
 
-        let state = if self.listening { "Listening" } else { "Paused" };
+        let state = if self.listening {
+            "Listening".to_string()
+        } else {
+            match self.grammar.first_phrase(&commands::Command::Resume) {
+                Some(word) if self.settings.voice_commands => format!("Paused · say “{word}”"),
+                _ => "Paused".to_string(),
+            }
+        };
         let mode_button = |label: &'static str, mode: Mode| {
             button(text(label).size(13))
                 .padding([3, 10])

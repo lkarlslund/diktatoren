@@ -42,6 +42,9 @@ pub enum Event {
     Preview(String),
     /// A finished utterance.
     Utterance(String),
+    /// Something said while paused in standby, for the app to check for resume or finish
+    /// commands.
+    Overheard(String),
     /// Models are loaded and the engine is ready.
     Ready { asr: String },
     Status(String),
@@ -53,10 +56,12 @@ pub enum Command {
     Configure(Box<Settings>),
     /// Starts listening. `from_wake` enables the silence timeout.
     Listen { from_wake: bool },
-    /// Listens to a WAV file instead of the microphone until listening stops.
+    /// While the dictation window is open, keep hearing commands even when paused.
+    Standby(bool),
+    /// Listens to a WAV file instead of the microphone until the dictation window closes.
     ListenFrom(PathBuf),
-    /// Stops listening; speech in progress is still recognised.
-    StopListening,
+    /// Stops listening, for the reason given; speech in progress is still recognised.
+    StopListening(&'static str),
     Shutdown,
 }
 
@@ -115,7 +120,7 @@ struct Loaded {
 enum Wake {
     /// A detector model and its preferred chunk size.
     Model(Session, usize),
-    Phrase(String),
+    Phrase(wake::Matcher),
 }
 
 /// Idle segmentation for the spoken wake phrase.
@@ -141,6 +146,7 @@ struct Engine {
     idle: Option<Idle>,
     /// A WAV file standing in for the microphone during one listening period.
     input_override: Option<String>,
+    standby: bool,
     commands: mpsc::Sender<Command>,
     wake_pos: i64,
     wake_pending: Vec<f32>,
@@ -155,6 +161,8 @@ struct Listening {
     vad_pending: Vec<f32>,
     /// Start of the utterance in progress, in samples since listening started.
     speech_start: Option<usize>,
+    /// Whether anything has been said since listening started.
+    spoke: bool,
     last_activity: Instant,
     last_preview: Instant,
     level_at: Instant,
@@ -174,6 +182,7 @@ impl Engine {
             listening: None,
             idle: None,
             input_override: None,
+            standby: false,
             commands,
             wake_pos: 0,
             wake_pending: Vec::new(),
@@ -205,7 +214,7 @@ impl Engine {
                 Ok(block) => {
                     if let Err(e) = self.process(block) {
                         self.emit(Event::Error(format!("{e:#}")));
-                        self.stop_listening();
+                        self.stop_listening("error");
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -229,14 +238,24 @@ impl Engine {
             }
             Command::ListenFrom(path) => {
                 log::info!("listening to {} instead of the microphone", path.display());
-                self.stop_listening();
+                self.stop_listening("switching to a file");
                 self.input_override = Some(format!("file:{}", path.display()));
                 self.capture = None;
                 if let Err(e) = self.start_listening(false) {
                     self.emit(Event::Error(format!("{e:#}")));
                 }
             }
-            Command::StopListening => self.stop_listening(),
+            Command::StopListening(reason) => self.stop_listening(reason),
+            Command::Standby(on) => {
+                if self.standby != on {
+                    self.standby = on;
+                    if !on && self.listening.is_none() && self.input_override.take().is_some() {
+                        self.capture = None;
+                    }
+                    self.start_idle();
+                    self.update_microphone();
+                }
+            }
             Command::Shutdown => {}
         }
     }
@@ -269,6 +288,8 @@ impl Engine {
             p.wake_word_package == settings.wake_word_package
                 && p.wake_word_threshold == settings.wake_word_threshold
                 && p.wake_phrase == settings.wake_phrase
+                && p.wake_variants == settings.wake_variants
+                && p.wake_tolerance == settings.wake_tolerance
                 && p.models_dir() == settings.models_dir()
         }) && wake.is_some() == settings.wake_word_enabled;
         let wake = if wake_unchanged {
@@ -300,7 +321,7 @@ impl Engine {
         Ok(())
     }
 
-    fn phrase(&self) -> Option<&str> {
+    fn phrase(&self) -> Option<&wake::Matcher> {
         match self.loaded.as_ref()?.wake.as_ref()? {
             Wake::Phrase(p) => Some(p),
             Wake::Model(..) => None,
@@ -310,7 +331,7 @@ impl Engine {
     /// Starts idle segmentation when waiting for a spoken wake phrase.
     fn start_idle(&mut self) {
         self.idle = None;
-        if self.listening.is_some() || self.phrase().is_none() {
+        if self.listening.is_some() || (self.phrase().is_none() && !self.standby) {
             return;
         }
         let loaded = self.loaded.as_mut().unwrap();
@@ -329,7 +350,10 @@ impl Engine {
             if s.wake_phrase.trim().is_empty() {
                 return Err(anyhow!("the wake phrase is empty"));
             }
-            return Ok(Some(Wake::Phrase(s.wake_phrase.trim().to_string())));
+            let tolerance = s.wake_tolerance.map(|t| t as usize);
+            let matcher = wake::Matcher::new(s.wake_phrase.trim(), &s.wake_variants, tolerance)
+                .ok_or_else(|| anyhow!("the wake phrase is empty"))?;
+            return Ok(Some(Wake::Phrase(matcher)));
         }
         let (family, package) = catalog::find(&s.wake_word_package)
             .ok_or_else(|| anyhow!("unknown wake word model {}", s.wake_word_package))?;
@@ -367,7 +391,7 @@ impl Engine {
 
     fn wake_active(&self) -> bool {
         self.listening.is_none()
-            && self.loaded.as_ref().is_some_and(|l| l.wake.is_some())
+            && (self.standby || self.loaded.as_ref().is_some_and(|l| l.wake.is_some()))
     }
 
     fn update_microphone(&mut self) {
@@ -414,6 +438,7 @@ impl Engine {
             vad_pos: 0,
             vad_pending: Vec::new(),
             speech_start: None,
+            spoke: false,
             last_activity: now,
             last_preview: now,
             level_at: now,
@@ -425,10 +450,10 @@ impl Engine {
         Ok(())
     }
 
-    fn stop_listening(&mut self) {
+    fn stop_listening(&mut self, reason: &str) {
         let Some(mut listening) = self.listening.take() else { return };
         log::info!(
-            "stopped listening after {:.1}s{}",
+            "stopped listening ({reason}) after {:.1}s{}",
             listening.audio.len() as f32 / SAMPLE_RATE as f32,
             if listening.speech_start.is_some() { ", finishing the utterance in progress" } else { "" }
         );
@@ -439,7 +464,8 @@ impl Engine {
             let _ = l.vad.stream_finish();
         }
         self.emit(Event::Listening(false));
-        if self.input_override.take().is_some() {
+        // A test file keeps playing through pauses while the dictation window is open.
+        if !self.standby && self.input_override.take().is_some() {
             self.capture = None;
         }
         self.start_idle();
@@ -471,9 +497,10 @@ impl Engine {
         let Some(l) = &self.listening else { return };
         let Some(settings) = self.settings() else { return };
         let timeout = Duration::from_secs(settings.wake_listen_timeout_s.max(1) as u64);
-        if l.from_wake && l.speech_start.is_none() && l.last_activity.elapsed() > timeout {
-            log::info!("silence timeout after wake word");
-            self.stop_listening();
+        // Only a wake with nothing said after it times out; once dictating, pauses to think
+        // must not stop listening.
+        if l.from_wake && !l.spoke && l.last_activity.elapsed() > timeout {
+            self.stop_listening("nothing said after the wake word");
         }
     }
 
@@ -484,7 +511,7 @@ impl Engine {
         if !self.wake_active() {
             return Ok(());
         }
-        if self.phrase().is_some() {
+        if self.phrase().is_some() || self.standby {
             return self.process_idle(block);
         }
         self.wake_pending.extend_from_slice(&block);
@@ -519,7 +546,8 @@ impl Engine {
 
     /// Cuts idle speech into utterances and hands short ones over to be checked for the phrase.
     fn process_idle(&mut self, block: Vec<f32>) -> Result<()> {
-        let phrase = self.phrase().unwrap_or_default().to_string();
+        let phrase = self.phrase().cloned();
+        let standby = self.standby;
         let (Some(loaded), Some(idle)) = (self.loaded.as_mut(), self.idle.as_mut()) else {
             return Ok(());
         };
@@ -557,7 +585,7 @@ impl Engine {
             let length = to.saturating_sub(from);
             if length > SAMPLE_RATE as usize / 4 && length <= MAX_WAKE_UTTERANCE
                 && let Some(r) = &self.recogniser {
-                    r.submit(Job::Wake(idle.audio[from..to].to_vec(), phrase.clone()));
+                    r.submit(Job::Wake(idle.audio[from..to].to_vec(), phrase.clone(), standby));
                 }
         }
         // Long speech is not a wake phrase; stop holding on to it.
@@ -602,6 +630,7 @@ impl Engine {
                 match activity.kind {
                     VoiceActivityKind::SpeechStart => {
                         l.speech_start.get_or_insert(at);
+                        l.spoke = true;
                         l.last_activity = Instant::now();
                     }
                     VoiceActivityKind::SpeechEnd => {
@@ -670,8 +699,8 @@ impl Asr {
 enum Job {
     Final(Vec<f32>),
     Preview(Vec<f32>),
-    /// Idle speech to compare with the wake phrase.
-    Wake(Vec<f32>, String),
+    /// Idle speech to compare with the wake phrase, and to pass on when in standby.
+    Wake(Vec<f32>, Option<wake::Matcher>, bool),
 }
 
 #[derive(Default)]
@@ -679,7 +708,7 @@ struct Queue {
     finals: VecDeque<Vec<f32>>,
     /// Only the newest preview is worth running.
     preview: Option<Vec<f32>>,
-    wake: Option<(Vec<f32>, String)>,
+    wake: Option<(Vec<f32>, Option<wake::Matcher>, bool)>,
     closed: bool,
 }
 
@@ -723,8 +752,8 @@ impl Recogniser {
                             if let Some(f) = q.finals.pop_front() {
                                 break Job::Final(f);
                             }
-                            if let Some((w, phrase)) = q.wake.take() {
-                                break Job::Wake(w, phrase);
+                            if let Some((w, phrase, standby)) = q.wake.take() {
+                                break Job::Wake(w, phrase, standby);
                             }
                             if let Some(p) = q.preview.take() {
                                 break Job::Preview(p);
@@ -735,16 +764,23 @@ impl Recogniser {
                     let (samples, is_final) = match job {
                         Job::Final(s) => (s, true),
                         Job::Preview(s) => (s, false),
-                        Job::Wake(samples, phrase) => {
+                        Job::Wake(samples, phrase, standby) => {
                             let started = Instant::now();
                             let heard = asr.transcribe(&samples).unwrap_or_default();
-                            let matched = wake::match_phrase(&heard, &phrase);
+                            let matched = phrase.as_ref().and_then(|p| p.find(&heard));
                             log::info!(
                                 "idle {:.1}s heard in {:.0?}: {heard:?} → {}",
                                 samples.len() as f32 / SAMPLE_RATE as f32,
                                 started.elapsed(),
-                                if matched.is_some() { "wake phrase" } else { "ignored" }
+                                match (&matched, standby) {
+                                    (Some(_), _) => "wake phrase",
+                                    (None, true) => "checked for paused commands",
+                                    (None, false) => "ignored",
+                                }
                             );
+                            if matched.is_none() && standby {
+                                sink(Event::Overheard(heard));
+                            }
                             if let Some(rest) = matched {
                                 sink(Event::WakeWord);
                                 let _ = commands.send(Command::Listen { from_wake: true });
@@ -795,7 +831,7 @@ impl Recogniser {
             }
             Job::Preview(s) => q.preview = Some(s),
             // Only the latest idle utterance matters if recognition falls behind.
-            Job::Wake(s, phrase) => q.wake = Some((s, phrase)),
+            Job::Wake(s, phrase, standby) => q.wake = Some((s, phrase, standby)),
         }
         cvar.notify_one();
     }

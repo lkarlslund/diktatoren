@@ -19,6 +19,7 @@ pub enum Outcome {
     Copy,
     Cancel,
     StopListening,
+    Resume,
     SwitchMode(Mode),
     /// The command had nothing to act on, such as deleting a word that is not there.
     NotFound,
@@ -117,6 +118,7 @@ impl Document {
             Copy => return Outcome::Copy,
             Cancel => return Outcome::Cancel,
             StopListening => return Outcome::StopListening,
+            Resume => return Outcome::Resume,
             EditMode => return Outcome::SwitchMode(Mode::Edit),
             DictateMode => return Outcome::SwitchMode(Mode::Dictate),
             Undo => {
