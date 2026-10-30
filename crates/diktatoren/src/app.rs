@@ -64,6 +64,8 @@ enum Message {
     Edit(text_editor::Action),
     Finish(Finish),
     Pause,
+    /// Undo or redo pressed on the bar.
+    History(commands::Command),
     SetMode(Mode),
     OpenSettings,
     WindowClosed(window::Id),
@@ -135,9 +137,8 @@ struct Popup {
     instructing: bool,
     /// Finishing waits for the tidy-up to come back.
     waiting: Option<Finish>,
-    /// Dictating straight into a text field of another application, with its text as it was
-    /// when the session started (for cancelling).
-    inline: Option<(crate::a11y::Target, String)>,
+    /// Dictating straight into a text field of another application.
+    inline: Option<crate::a11y::Target>,
 }
 
 struct SettingsWindow {
@@ -269,6 +270,17 @@ impl App {
                     self.engine.send(EngineCommand::Listen { from_wake: false });
                 }
                 self.focus_popup()
+            }
+            Message::History(command) => {
+                if let Some(p) = &mut self.popup {
+                    refresh_inline(p);
+                    let before = p.doc.text().to_string();
+                    let outcome = p.doc.apply(&command);
+                    log::info!("{command:?} from the bar → {outcome:?}");
+                    push_inline(p, &before);
+                    sync_editor(p);
+                }
+                Task::none()
             }
             Message::Pause => {
                 self.engine.send(EngineCommand::StopListening("Pause button"));
@@ -640,7 +652,7 @@ impl App {
         self.theme = crate::theme::current();
         self.engine.send(EngineCommand::Standby(true));
         let (id, open) = window::open(window::Settings {
-            size: Size::new(540.0, 52.0),
+            size: Size::new(640.0, 52.0),
             resizable: false,
             decorations: false,
             transparent: true,
@@ -668,7 +680,7 @@ impl App {
             tidying: false,
             instructing: false,
             waiting: None,
-            inline: Some((field, snapshot.text)),
+            inline: Some(field),
         });
         #[cfg(target_os = "linux")]
         crate::kwin::place_bar();
@@ -790,23 +802,16 @@ impl App {
         log::info!("finished with {finish:?}: {} characters", popup.doc.text().trim().chars().count());
         self.engine.send(EngineCommand::StopListening("finished"));
         let close = window::close(popup.id);
-        if let Some((field, original)) = popup.inline.take() {
-            // The text is already in place; cancelling puts the field back as it was.
+        if popup.inline.take().is_some() {
+            // The text is already in place: closing leaves it as it is.
             match finish {
-                Finish::Cancel => {
-                    let current = crate::a11y::read(&field).map(|s| s.text).unwrap_or_default();
-                    let end = original.len();
-                    if let Err(e) = crate::a11y::write(&field, crate::a11y::diff(&current, &original, end..end)) {
-                        log::warn!("restoring the field: {e:#}");
-                    }
-                }
+                Finish::Cancel | Finish::Insert => {}
                 Finish::Copy => {
                     let clipboard = self.clipboard.get_or_insert_with(Clipboard::new);
                     if let Err(e) = clipboard.set(popup.doc.text()) {
                         self.status = format!("{e:#}");
                     }
                 }
-                Finish::Insert => {}
             }
             return close;
         }
@@ -1009,13 +1014,18 @@ impl App {
                 state_button(say(commands::Command::EditMode, "Edit"), listening && p.mode == Mode::Edit, Message::SetMode(Mode::Edit)),
                 progress_bar(0.0..=1.0, if listening { self.level } else { 0.0 }).length(Length::Fixed(70.0)).girth(6),
                 text(activity).size(11).width(Length::Fill),
+                button(text(say(commands::Command::Undo, "Undo")).size(13))
+                    .padding([3, 8])
+                    .on_press(Message::History(commands::Command::Undo))
+                    .style(secondary_button),
+                button(text(say(commands::Command::Redo, "Redo")).size(13))
+                    .padding([3, 8])
+                    .on_press(Message::History(commands::Command::Redo))
+                    .style(secondary_button),
                 button(gear()).padding(3).on_press(Message::OpenSettings).style(button::text),
-                button(text(say(commands::Command::Insert, "Insert")).size(13))
-                    .padding([3, 10])
-                    .on_press(Message::Finish(Finish::Insert)),
                 button(text("✕").size(13))
                     .padding([3, 8])
-                    .on_press(Message::Finish(Finish::Cancel))
+                    .on_press(Message::Finish(Finish::Insert))
                     .style(secondary_button),
             ]
             .spacing(6)
@@ -1549,7 +1559,7 @@ fn sync_doc(doc: &mut Document, snapshot: &crate::a11y::Snapshot) {
 
 /// Re-reads an inline field before an edit, so typing done there in between is respected.
 fn refresh_inline(p: &mut Popup) {
-    if let Some((field, _)) = &p.inline {
+    if let Some(field) = &p.inline {
         match crate::a11y::read(field) {
             Ok(snapshot) => {
                 log::info!(
@@ -1567,7 +1577,7 @@ fn refresh_inline(p: &mut Popup) {
 
 /// Writes what changed in the document back to an inline field.
 fn push_inline(p: &mut Popup, before: &str) {
-    let Some((field, _)) = &p.inline else { return };
+    let Some(field) = &p.inline else { return };
     if before == p.doc.text() && p.doc.selection().is_empty() {
         return;
     }

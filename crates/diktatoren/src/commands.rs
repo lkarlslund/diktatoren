@@ -134,7 +134,7 @@ pub fn specs() -> Vec<Spec> {
         fixed("dash", "Dash", true, Punctuation(" –"), "dash", "tankestreg"),
         fixed("undo", "Undo", true, Undo, "undo, undo that", "fortryd, fortryd det"),
         fixed("delete_that", "Delete the selection or last piece", true, DeleteThat, "delete that, scratch that, strike that", "slet det, slet det der, fjern det"),
-        fixed("redo", "Redo", false, Redo, "redo, redo that", "gentag, annuller fortryd"),
+        fixed("redo", "Redo", true, Redo, "redo, redo that", "gentag, annuller fortryd"),
         fixed("delete_last_word", "Delete the last word", false, DeleteLastWords(1), "delete last word, delete the last word", "slet sidste ord, fjern sidste ord"),
         fixed("delete_last_sentence", "Delete the last sentence", false, DeleteLastSentences(1), "delete last sentence, delete the last sentence", "slet sidste sætning, fjern sidste sætning"),
         fixed("clear_all", "Delete everything", false, ClearAll, "clear all, delete all, delete everything", "slet alt, ryd alt"),

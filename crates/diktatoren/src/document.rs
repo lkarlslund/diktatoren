@@ -5,10 +5,18 @@ use std::ops::Range;
 
 use crate::commands::{Command, Mode};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Snapshot {
-    text: String,
-    selection: Range<usize>,
+/// One change in the undo history: at `at`, `removed` was replaced by `inserted`. Undo and
+/// redo find the spot again by its content, so typing done elsewhere in between survives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Change {
+    at: usize,
+    /// Up to 24 bytes of the text just before `at`, to find the spot when the change itself is
+    /// empty on one side (a pure insertion or deletion).
+    anchor: String,
+    removed: String,
+    inserted: String,
+    selection_before: Range<usize>,
+    selection_after: Range<usize>,
 }
 
 /// What a command asks of the surrounding app.
@@ -34,8 +42,10 @@ pub struct Document {
     /// Freshly dictated text not yet tidied by the language model, with its content at the
     /// time, so later edits that touch it can be noticed.
     untidy: Option<(usize, String)>,
-    undo: Vec<Snapshot>,
-    redo: Vec<Snapshot>,
+    undo: Vec<Change>,
+    redo: Vec<Change>,
+    /// The state before the operation in progress, turned into a [`Change`] when it ends.
+    pending: Option<(String, Range<usize>)>,
 }
 
 impl Document {
@@ -67,25 +77,64 @@ impl Document {
         }
         self.text = text;
         self.selection = clamp(&self.text, selection);
+        self.commit();
     }
 
-    fn snapshot(&self) -> Snapshot {
-        Snapshot { text: self.text.clone(), selection: self.selection.clone() }
-    }
-
+    /// Remembers the state before an operation changes the text.
     fn checkpoint(&mut self) {
-        self.undo.push(self.snapshot());
+        if self.pending.is_none() {
+            self.pending = Some((self.text.clone(), self.selection.clone()));
+        }
+    }
+
+    /// Records what the finished operation changed as one undo step.
+    fn commit(&mut self) {
+        let Some((before, selection_before)) = self.pending.take() else { return };
+        if before == self.text {
+            return;
+        }
+        let (at, removed, inserted) = text_change(&before, &self.text);
+        let mut from = at.saturating_sub(24);
+        while !before.is_char_boundary(from) {
+            from += 1;
+        }
+        let anchor = before[from..at].to_string();
+        self.undo.push(Change { at, anchor, removed, inserted, selection_before, selection_after: self.selection.clone() });
         self.redo.clear();
-        if self.undo.len() > 200 {
+        if self.undo.len() > 500 {
             self.undo.remove(0);
         }
     }
 
-    fn restore(&mut self, s: Snapshot) {
+    /// Where `content`, preceded by `anchor`, is now: at `at` if it is still there, otherwise
+    /// at its nearest occurrence.
+    fn locate(&self, at: usize, anchor: &str, content: &str) -> Option<usize> {
+        let fits = |pos: usize| {
+            self.text.get(pos..pos + content.len()) == Some(content)
+                && pos >= anchor.len()
+                && self.text.get(pos - anchor.len()..pos) == Some(anchor)
+        };
+        if fits(at) {
+            return Some(at);
+        }
+        let needle = format!("{anchor}{content}");
+        if needle.is_empty() {
+            return Some(clamp(&self.text, at..at).start);
+        }
+        self.text
+            .match_indices(needle.as_str())
+            .map(|(i, _)| i + anchor.len())
+            .min_by_key(|&i| i.abs_diff(at))
+    }
+
+    /// Replaces `from` with `to` near `at`; the shared body of undo and redo.
+    fn swap(&mut self, at: usize, anchor: &str, from: &str, to: &str, selection: &Range<usize>) -> bool {
+        let Some(pos) = self.locate(at, anchor, from) else { return false };
+        self.text.replace_range(pos..pos + from.len(), to);
+        self.selection = if pos == at { clamp(&self.text, selection.clone()) } else { pos + to.len()..pos + to.len() };
         self.untidy = None;
-        self.text = s.text;
-        self.selection = s.selection;
         self.last_insert = None;
+        true
     }
 
     /// Inserts recognised speech at the cursor, fixing up spacing and capitalisation against
@@ -135,10 +184,12 @@ impl Document {
             _ => Some((inserted.start, self.text[inserted.clone()].to_string())),
         };
         self.last_insert = Some(inserted);
+        self.commit();
     }
 
     pub fn apply(&mut self, command: &Command) -> Outcome {
         let outcome = self.apply_command(command);
+        self.commit();
         // Edits that changed the untidied stretch itself end it.
         if let Some((start, text)) = &self.untidy
             && self.text.get(*start..start + text.len()) != Some(text.as_str())
@@ -208,6 +259,7 @@ impl Document {
         self.selection = cursor..cursor;
         self.last_insert = None;
         self.untidy = None;
+        self.commit();
         true
     }
 
@@ -258,6 +310,7 @@ impl Document {
         self.splice_keep_cursor(start..end, &replacement);
         self.untidy = still_untidy.map(|rest| (start + replacement.len(), rest));
         self.last_insert = None;
+        self.commit();
         true
     }
 
@@ -271,14 +324,18 @@ impl Document {
             EditMode => return Outcome::SwitchMode(Mode::Edit),
             DictateMode => return Outcome::SwitchMode(Mode::Dictate),
             Undo => {
-                let Some(prev) = self.undo.pop() else { return Outcome::NotFound };
-                self.redo.push(self.snapshot());
-                self.restore(prev);
+                let Some(change) = self.undo.pop() else { return Outcome::NotFound };
+                if !self.swap(change.at, &change.anchor, &change.inserted, &change.removed, &change.selection_before) {
+                    return Outcome::NotFound;
+                }
+                self.redo.push(change);
             }
             Redo => {
-                let Some(next) = self.redo.pop() else { return Outcome::NotFound };
-                self.undo.push(self.snapshot());
-                self.restore(next);
+                let Some(change) = self.redo.pop() else { return Outcome::NotFound };
+                if !self.swap(change.at, &change.anchor, &change.removed, &change.inserted, &change.selection_after) {
+                    return Outcome::NotFound;
+                }
+                self.undo.push(change);
             }
             ListItem(n) => {
                 self.checkpoint();
@@ -445,6 +502,20 @@ impl Document {
         self.splice_keep_cursor(start..end, "");
         self.last_insert = None;
     }
+}
+
+/// The differing middle of two texts: where it starts, what `old` had there and what `new` has.
+fn text_change(old: &str, new: &str) -> (usize, String, String) {
+    let mut prefix = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(prefix) || !new.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+    let max_suffix = old.len().min(new.len()) - prefix;
+    let mut suffix = old.bytes().rev().zip(new.bytes().rev()).take(max_suffix).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix) {
+        suffix -= 1;
+    }
+    (prefix, old[prefix..old.len() - suffix].to_string(), new[prefix..new.len() - suffix].to_string())
 }
 
 fn clamp(text: &str, r: Range<usize>) -> Range<usize> {
@@ -690,6 +761,33 @@ mod tests {
     fn numbered_lists() {
         let d = doc(&["Der kommer en liste.", "1 Vi kan ikke se horisonten", "to", "det er belastende"]);
         assert_eq!(d.text(), "Der kommer en liste.\n1. Vi kan ikke se horisonten\n2. Det er belastende");
+    }
+
+    #[test]
+    fn undo_and_redo_many_steps() {
+        let mut d = doc(&["Første.", "Anden.", "Tredje."]);
+        d.apply(&Command::Undo);
+        d.apply(&Command::Undo);
+        assert_eq!(d.text(), "Første.");
+        d.apply(&Command::Redo);
+        assert_eq!(d.text(), "Første. Anden.");
+        d.apply(&Command::Redo);
+        assert_eq!(d.text(), "Første. Anden. Tredje.");
+        assert_eq!(d.apply(&Command::Redo), Outcome::NotFound);
+    }
+
+    #[test]
+    fn undo_keeps_typing_done_elsewhere() {
+        let mut d = Document::default();
+        d.sync_from("Hej.".into(), 4..4);
+        d.dictate("vi ses i morgen");
+        assert_eq!(d.text(), "Hej. Vi ses i morgen");
+        // The user types at the start in the other application.
+        d.sync_from("Kære Ole. Hej. Vi ses i morgen".into(), 30..30);
+        d.apply(&Command::Undo);
+        assert_eq!(d.text(), "Kære Ole. Hej.");
+        d.apply(&Command::Redo);
+        assert_eq!(d.text(), "Kære Ole. Hej. Vi ses i morgen");
     }
 
     #[test]
