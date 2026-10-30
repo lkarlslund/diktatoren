@@ -70,7 +70,7 @@ pub struct Settings {
     pub language: String,
     /// Silence that ends an utterance.
     pub utterance_silence_ms: u32,
-    /// After a wake word, stop listening when nothing has been said for this long.
+    /// After a wake word, close the dictation window if nothing is said for this long.
     pub wake_listen_timeout_s: u32,
     pub input_device: String,
     pub enter_action: FinishAction,

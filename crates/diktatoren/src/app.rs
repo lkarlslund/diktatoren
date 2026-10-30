@@ -384,6 +384,12 @@ impl App {
             }
             engine::Event::Utterance(utterance) => return self.utterance(utterance),
             engine::Event::Overheard(heard) => return self.overheard(heard),
+            engine::Event::WakeTimedOut => {
+                if self.popup.as_ref().is_some_and(|p| p.doc.text().trim().is_empty()) {
+                    log::info!("closing: nothing said after the wake word");
+                    return self.finish(Finish::Cancel);
+                }
+            }
             engine::Event::Ready { asr } => self.status = format!("Ready · {asr}"),
             engine::Event::Status(s) => self.status = s,
             engine::Event::Error(e) => {
@@ -889,14 +895,14 @@ impl App {
             },
             sensitivity,
             labeled(
-                "Stop after silence",
+                "Close if silent for",
                 row![
                     slider(5.0_f32..=120.0_f32, d.wake_listen_timeout_s as f32, M::WakeTimeout).step(5.0_f32).width(200),
                     text(format!("{} s", d.wake_listen_timeout_s)).size(13)
                 ]
                 .spacing(10),
             ),
-            hint("After a wake word, listening stops when nothing has been said for this long."),
+            hint("After a wake word, the dictation window closes again if nothing is said for this long, to undo false wakes. Once you have said something, it stays open."),
             section("Microphone"),
             labeled("Input", pick_list(mics, mic_selected, M::Microphone).width(320)),
         ]

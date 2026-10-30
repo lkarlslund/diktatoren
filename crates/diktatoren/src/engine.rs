@@ -40,6 +40,8 @@ pub enum Event {
     Level(f32),
     /// Recognition of the utterance in progress; replaced by the next preview or final text.
     Preview(String),
+    /// Nothing was said within the timeout after a wake word; probably a false wake.
+    WakeTimedOut,
     /// A finished utterance.
     Utterance(String),
     /// Something said while paused in standby, for the app to check for resume or finish
@@ -497,9 +499,11 @@ impl Engine {
         let Some(l) = &self.listening else { return };
         let Some(settings) = self.settings() else { return };
         let timeout = Duration::from_secs(settings.wake_listen_timeout_s.max(1) as u64);
-        if l.from_wake && l.speech_start.is_none() && l.last_activity.elapsed() > timeout {
-            let reason = if l.spoke { "silence after the wake word" } else { "nothing said after the wake word" };
-            self.stop_listening(reason);
+        // A wake with nothing said after it was probably false. Once anything is said there
+        // is no timeout: pauses to think must not end the dictation.
+        if l.from_wake && !l.spoke && l.last_activity.elapsed() > timeout {
+            self.stop_listening("nothing said after the wake word");
+            self.emit(Event::WakeTimedOut);
         }
     }
 
@@ -782,7 +786,8 @@ impl Recogniser {
                             }
                             if let Some(rest) = matched {
                                 sink(Event::WakeWord);
-                                let _ = commands.send(Command::Listen { from_wake: true });
+                                // Words after the phrase mean this was no false wake.
+                                let _ = commands.send(Command::Listen { from_wake: rest.is_empty() });
                                 if !rest.is_empty() {
                                     sink(Event::Utterance(rest));
                                 }
