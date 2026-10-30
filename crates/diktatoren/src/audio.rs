@@ -119,17 +119,39 @@ fn open(name: &str, sink: mpsc::Sender<Vec<f32>>) -> Result<cpal::Stream> {
     let config = device.default_input_config().context("reading microphone format")?;
     log::info!("capturing from {device} ({config:?})");
     let format = config.sample_format();
-    let stream_config: cpal::StreamConfig = config.into();
-    let stream = match format {
-        SampleFormat::F32 => build::<f32>(&device, stream_config, sink),
-        SampleFormat::I16 => build::<i16>(&device, stream_config, sink),
-        SampleFormat::I32 => build::<i32>(&device, stream_config, sink),
-        SampleFormat::U16 => build::<u16>(&device, stream_config, sink),
-        SampleFormat::I8 => build::<i8>(&device, stream_config, sink),
-        other => Err(anyhow!("unsupported microphone sample format {other}")),
-    }?;
-    stream.play().context("starting microphone")?;
-    Ok(stream)
+    // Small buffers keep the level meter and voice detection close to real time; servers
+    // otherwise default to delivering audio in half-second chunks.
+    let chunk = match config.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => {
+            Some((config.sample_rate() / 50).clamp(*min, *max))
+        }
+        cpal::SupportedBufferSize::Unknown => None,
+    };
+    let default_config: cpal::StreamConfig = config.into();
+    let mut attempts = Vec::new();
+    if let Some(frames) = chunk {
+        attempts.push(cpal::StreamConfig { buffer_size: cpal::BufferSize::Fixed(frames), ..default_config.clone() });
+    }
+    attempts.push(default_config);
+    let mut last_error = anyhow!("no stream configuration to try");
+    for stream_config in attempts {
+        let built = match format {
+            SampleFormat::F32 => build::<f32>(&device, stream_config, sink.clone()),
+            SampleFormat::I16 => build::<i16>(&device, stream_config, sink.clone()),
+            SampleFormat::I32 => build::<i32>(&device, stream_config, sink.clone()),
+            SampleFormat::U16 => build::<u16>(&device, stream_config, sink.clone()),
+            SampleFormat::I8 => build::<i8>(&device, stream_config, sink.clone()),
+            other => return Err(anyhow!("unsupported microphone sample format {other}")),
+        };
+        match built {
+            Ok(stream) => {
+                stream.play().context("starting microphone")?;
+                return Ok(stream);
+            }
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
 }
 
 fn build<T>(

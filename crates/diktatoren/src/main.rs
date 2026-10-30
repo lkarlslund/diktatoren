@@ -189,16 +189,20 @@ fn mic_test(settings: &Settings) -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
     let _capture = audio::Capture::start(&settings.input_device, tx)?;
     let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    let (mut samples, mut peak) = (0usize, 0f32);
+    let (mut samples, mut peak, mut blocks) = (0usize, 0f32, 0usize);
+    let mut longest_gap = std::time::Duration::ZERO;
+    let mut last = std::time::Instant::now();
     while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
         let Ok(block) = rx.recv_timeout(left) else { break };
+        longest_gap = longest_gap.max(last.elapsed());
+        last = std::time::Instant::now();
+        blocks += 1;
         samples += block.len();
         peak = block.iter().fold(peak, |p, s| p.max(s.abs()));
     }
     println!(
-        "received {:.1} s of audio, peak level {:.3}",
+        "received {:.1} s of audio in {blocks} blocks (longest gap {longest_gap:.0?}), peak level {peak:.3}",
         samples as f32 / audio::SAMPLE_RATE as f32,
-        peak
     );
     if samples == 0 {
         bail!("the microphone delivered no audio");

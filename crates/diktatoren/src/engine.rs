@@ -543,10 +543,12 @@ impl Engine {
         l.audio.extend_from_slice(&block);
         l.vad_pending.extend_from_slice(&block);
 
-        if l.level_at.elapsed() > Duration::from_millis(60) {
+        if l.level_at.elapsed() >= Duration::from_millis(30) {
             let rms = (block.iter().map(|s| s * s).sum::<f32>() / block.len().max(1) as f32).sqrt();
             l.level_at = Instant::now();
-            (self.sink)(Event::Level((rms * 6.0).min(1.0)));
+            // -50 dBFS (room noise) to 0 dBFS maps onto 0..1.
+            let db = 20.0 * rms.max(1e-6).log10();
+            (self.sink)(Event::Level(((db + 50.0) / 50.0).clamp(0.0, 1.0)));
         }
 
         let chunk = loaded.vad_chunk;

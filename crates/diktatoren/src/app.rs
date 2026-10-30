@@ -330,7 +330,10 @@ impl App {
                     t.set_state(if on { IconState::Listening } else { IconState::Idle });
                 }
             }
-            engine::Event::Level(level) => self.level = level,
+            // Rise at once, fall back smoothly.
+            engine::Event::Level(level) => {
+                self.level = if level > self.level { level } else { self.level * 0.7 + level * 0.3 };
+            }
             engine::Event::Preview(preview) => {
                 if let Some(p) = &mut self.popup {
                     p.preview = preview;
