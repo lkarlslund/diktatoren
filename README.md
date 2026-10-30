@@ -50,31 +50,28 @@ Turn it on under **Settings → General**. There are two kinds:
 
 After a wake word, listening stops by itself after a few seconds of silence (configurable).
 
-### Editing by voice
+### Dictate and Edit mode
 
-Dictated text lands at the cursor, replacing any selection. Click or select text in the box,
-or say "select …", to change where the next words go. A command must be said on its own, as
-its own utterance. English and Danish phrasings both work:
+The dictation window has two modes, shown as **Dictate / Edit** buttons next to the level
+meter. Switch by clicking or by saying "edit" / "dictate" ("redigér" / "diktér" in Danish).
 
-| Say | Effect |
-|---|---|
-| insert · indsæt | insert the text into the previous window |
-| copy · kopiér | copy to the clipboard |
-| cancel · annuller | close without doing anything |
-| pause · stop med at lytte | stop listening |
-| new line · ny linje, new paragraph · nyt afsnit | line breaks |
-| period, comma, question mark … · punktum, komma, spørgsmålstegn … | punctuation |
-| undo · fortryd, redo · gentag | undo or redo |
-| delete that · slet det | remove the selection, or the last dictated piece |
-| delete last word / sentence · slet sidste ord / sætning | |
-| delete X · slet X | remove the last occurrence of X |
-| replace X with Y · erstat X med Y · ret X til Y | fix a word, keeping its capitalisation |
-| select X · markér X | select X; what you say next replaces it |
-| select all · markér alt, clear all · slet alt | |
-| go to end / start · gå til slutningen / starten | move the cursor |
+* **Dictate**: what you say becomes text at the cursor, replacing any selection. A few control
+  commands said on their own still act: insert, copy, cancel, pause, new line, new paragraph,
+  punctuation ("period", "comma" …), undo and "delete that".
+* **Edit**: what you say is an editing command, and nothing is typed by accident. Besides the
+  control commands: "replace X with Y", "delete X", "select X", "delete last word / sentence",
+  "select all", "clear all", "go to end / start", "redo". After "select X", words that are no
+  command replace the selection.
 
-To avoid surprises you can require a prefix word ("command …" / "kommando …") under
-**Settings → Voice commands**.
+A command has to be said on its own, with a short pause before and after. Lone words match
+loosely, so "Inset" or "Annuler" from the recogniser still count.
+
+### Command language
+
+Under **Settings → Voice commands**, choose **English** or **Dansk** and every command phrase
+switches language (the default follows your system language). Each command is listed with its
+phrases, separated by commas, and can be edited; editing one turns the set into **Custom**.
+Picking English or Dansk again restores that preset.
 
 ### Inserting text
 

@@ -1,11 +1,14 @@
 //! Settings, persisted as TOML in the platform config directory.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+
+use crate::commands::{self, Language};
 
 pub fn project_dirs() -> ProjectDirs {
     ProjectDirs::from("", "", "diktatoren").expect("no home directory")
@@ -72,8 +75,9 @@ pub struct Settings {
     pub paste_shortcut: String,
     pub restore_clipboard: bool,
     pub voice_commands: bool,
-    /// Only treat utterances starting with a command word ("command", "kommando") as commands.
-    pub require_command_prefix: bool,
+    pub command_language: Language,
+    /// The edited phrase lists when `command_language` is custom, keyed by command.
+    pub command_phrases: BTreeMap<String, String>,
     pub models_dir: Option<PathBuf>,
     /// Lets the Wayland remote-desktop portal skip its permission prompt after the first use.
     pub portal_restore_token: Option<String>,
@@ -100,7 +104,8 @@ impl Default for Settings {
             paste_shortcut: if cfg!(target_os = "macos") { "Cmd+V" } else { "Ctrl+V" }.into(),
             restore_clipboard: true,
             voice_commands: true,
-            require_command_prefix: false,
+            command_language: Language::from_locale(),
+            command_phrases: BTreeMap::new(),
             models_dir: None,
             portal_restore_token: None,
         }
@@ -128,6 +133,22 @@ impl Settings {
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, text)?;
         fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// The phrases in force: a preset, or the custom lists filled up from English.
+    pub fn command_phrases(&self) -> BTreeMap<String, String> {
+        match self.command_language {
+            Language::Custom => {
+                let mut phrases = commands::preset(Language::English);
+                phrases.extend(self.command_phrases.clone());
+                phrases
+            }
+            preset => commands::preset(preset),
+        }
+    }
+
+    pub fn grammar(&self) -> commands::Grammar {
+        commands::Grammar::new(&self.command_phrases())
     }
 
     pub fn uses_server(&self) -> bool {

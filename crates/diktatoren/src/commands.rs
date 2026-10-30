@@ -1,8 +1,26 @@
-//! Recognises spoken edit commands in English and Danish.
+//! Recognises spoken commands.
 //!
-//! A command must make up the whole utterance, so ordinary dictation that merely contains a
-//! command word is left alone. Saying "command …" / "kommando …" first forces command
-//! interpretation, and is required when `require_prefix` is set.
+//! A command must make up the whole utterance, so dictation that merely contains a command word
+//! is left alone. Recognisers spell lone words inconsistently ("indsæt", "Indsæt!", "inset"),
+//! so fixed phrases match with a few letters of tolerance.
+//!
+//! The phrases come in English and Danish presets and can be edited, which makes them
+//! "custom". In [`Mode::Dictate`] only the control commands apply (finishing, line breaks,
+//! punctuation, undo, switching mode); in [`Mode::Edit`] every command does.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::wake::levenshtein;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Speech is text, apart from control commands said on their own.
+    Dictate,
+    /// Speech is editing commands.
+    Edit,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -10,6 +28,8 @@ pub enum Command {
     Copy,
     Cancel,
     StopListening,
+    EditMode,
+    DictateMode,
     NewLine,
     NewParagraph,
     Undo,
@@ -29,7 +49,206 @@ pub enum Command {
     Punctuation(&'static str),
 }
 
-const PREFIXES: [&str; 3] = ["command", "kommando", "computer"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Language {
+    English,
+    Danish,
+    /// Phrases the user edited.
+    Custom,
+}
+
+impl Language {
+    /// Danish when the system locale is Danish, otherwise English.
+    pub fn from_locale() -> Self {
+        let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .iter()
+            .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))
+            .unwrap_or_default();
+        if locale.starts_with("da") { Language::Danish } else { Language::English }
+    }
+}
+
+impl std::fmt::Display for Language {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Language::English => "English",
+            Language::Danish => "Dansk",
+            Language::Custom => "Custom",
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Slot {
+    Fixed(Command),
+    ReplaceVerb,
+    ReplaceSeparator,
+    DeleteVerb,
+    SelectVerb,
+}
+
+/// One editable phrase list.
+pub struct Spec {
+    pub key: &'static str,
+    pub label: &'static str,
+    /// Applies while dictating, not only while editing.
+    pub control: bool,
+    slot: Slot,
+    english: &'static str,
+    danish: &'static str,
+}
+
+pub fn specs() -> Vec<Spec> {
+    use Command::*;
+    let fixed = |key, label, control, command, english, danish| Spec {
+        key,
+        label,
+        control,
+        slot: Slot::Fixed(command),
+        english,
+        danish,
+    };
+    vec![
+        fixed("insert", "Insert into the window", true, Insert, "insert, insert it, paste, paste it", "indsæt, sæt ind, indsæt teksten"),
+        fixed("copy", "Copy to the clipboard", true, Copy, "copy, copy it, copy that", "kopiér, kopier, kopiér det, kopier teksten"),
+        fixed("cancel", "Cancel", true, Cancel, "cancel, cancel that, never mind", "annuller, annullér, afbryd, glem det"),
+        fixed("pause", "Stop listening", true, StopListening, "pause, stop listening", "pause, stop med at lytte, hold pause"),
+        fixed("edit_mode", "Switch to Edit mode", true, EditMode, "edit, edit mode, editing", "redigér, rediger, redigering"),
+        fixed("dictate_mode", "Switch to Dictate mode", true, DictateMode, "dictate, dictation, dictate mode", "diktér, dikter, diktat"),
+        fixed("new_line", "New line", true, NewLine, "new line, line break, next line", "ny linje, linjeskift, næste linje"),
+        fixed("new_paragraph", "New paragraph", true, NewParagraph, "new paragraph, next paragraph", "nyt afsnit, næste afsnit"),
+        fixed("period", "Full stop", true, Punctuation("."), "period, full stop", "punktum"),
+        fixed("comma", "Comma", true, Punctuation(","), "comma", "komma"),
+        fixed("question_mark", "Question mark", true, Punctuation("?"), "question mark", "spørgsmålstegn"),
+        fixed("exclamation_mark", "Exclamation mark", true, Punctuation("!"), "exclamation mark, exclamation point", "udråbstegn"),
+        fixed("colon", "Colon", true, Punctuation(":"), "colon", "kolon"),
+        fixed("semicolon", "Semicolon", true, Punctuation(";"), "semicolon", "semikolon"),
+        fixed("dash", "Dash", true, Punctuation(" –"), "dash", "tankestreg"),
+        fixed("undo", "Undo", true, Undo, "undo, undo that", "fortryd, fortryd det"),
+        fixed("delete_that", "Delete the selection or last piece", true, DeleteThat, "delete that, scratch that, strike that", "slet det, slet det der, fjern det"),
+        fixed("redo", "Redo", false, Redo, "redo, redo that", "gentag, annuller fortryd"),
+        fixed("delete_last_word", "Delete the last word", false, DeleteLastWord, "delete last word, delete the last word", "slet sidste ord, fjern sidste ord"),
+        fixed("delete_last_sentence", "Delete the last sentence", false, DeleteLastSentence, "delete last sentence, delete the last sentence", "slet sidste sætning, fjern sidste sætning"),
+        fixed("clear_all", "Delete everything", false, ClearAll, "clear all, delete all, delete everything", "slet alt, ryd alt"),
+        fixed("select_all", "Select everything", false, SelectAll, "select all, select everything", "markér alt, marker alt, vælg alt"),
+        fixed("go_to_end", "Cursor to the end", false, GoToEnd, "go to end, go to the end", "gå til slutningen, til slutningen"),
+        fixed("go_to_start", "Cursor to the start", false, GoToStart, "go to start, go to the start, go to the beginning", "gå til starten, gå til begyndelsen"),
+        Spec { key: "replace", label: "Replace … (verb)", control: false, slot: Slot::ReplaceVerb, english: "replace, change", danish: "erstat, ret, skift, udskift" },
+        Spec { key: "replace_with", label: "… with … (separator)", control: false, slot: Slot::ReplaceSeparator, english: "with, to", danish: "med, til, ud med" },
+        Spec { key: "delete", label: "Delete … (verb)", control: false, slot: Slot::DeleteVerb, english: "delete, remove", danish: "slet, fjern" },
+        Spec { key: "select", label: "Select … (verb)", control: false, slot: Slot::SelectVerb, english: "select", danish: "markér, marker, vælg" },
+    ]
+}
+
+/// The phrases of a preset language, keyed by [`Spec::key`].
+pub fn preset(language: Language) -> BTreeMap<String, String> {
+    specs()
+        .into_iter()
+        .map(|s| {
+            let phrases = match language {
+                Language::Danish => s.danish,
+                Language::English | Language::Custom => s.english,
+            };
+            (s.key.to_string(), phrases.to_string())
+        })
+        .collect()
+}
+
+fn split_list(phrases: &str) -> Vec<String> {
+    phrases.split(',').map(normalize).filter(|p| !p.is_empty()).collect()
+}
+
+/// Commands compiled from a phrase table.
+pub struct Grammar {
+    fixed: Vec<(Vec<String>, Command, bool)>,
+    replace: Vec<String>,
+    separators: Vec<String>,
+    delete: Vec<String>,
+    select: Vec<String>,
+}
+
+impl Grammar {
+    pub fn new(phrases: &BTreeMap<String, String>) -> Self {
+        let mut g = Grammar { fixed: Vec::new(), replace: Vec::new(), separators: Vec::new(), delete: Vec::new(), select: Vec::new() };
+        for spec in specs() {
+            let list = split_list(phrases.get(spec.key).map_or("", String::as_str));
+            match spec.slot {
+                Slot::Fixed(command) => g.fixed.push((list, command, spec.control)),
+                Slot::ReplaceVerb => g.replace = list,
+                Slot::ReplaceSeparator => g.separators = list,
+                Slot::DeleteVerb => g.delete = list,
+                Slot::SelectVerb => g.select = list,
+            }
+        }
+        g
+    }
+
+    pub fn parse(&self, utterance: &str, mode: Mode) -> Option<Command> {
+        let body = normalize(utterance);
+        if body.is_empty() {
+            return None;
+        }
+        if let Some(command) = self.fixed(&body, mode) {
+            return Some(command);
+        }
+        if mode == Mode::Dictate {
+            return None;
+        }
+        self.argument(utterance.trim().trim_end_matches(['.', '!', '?']))
+    }
+
+    /// The fixed-phrase command `body` is, exactly or within a few letters.
+    fn fixed(&self, body: &str, mode: Mode) -> Option<Command> {
+        let heard = letters(body);
+        let mut best: Option<(usize, &Command)> = None;
+        for (list, command, control) in &self.fixed {
+            if mode == Mode::Dictate && !control {
+                continue;
+            }
+            for phrase in list {
+                if phrase == body {
+                    return Some(command.clone());
+                }
+                let target = letters(phrase);
+                let distance = levenshtein(&heard, &target);
+                if distance <= tolerance(target.len()) && best.is_none_or(|(d, _)| distance < d) {
+                    best = Some((distance, command));
+                }
+            }
+        }
+        best.map(|(_, c)| c.clone())
+    }
+
+    /// Replace, delete and select. The argument keeps the speaker's casing.
+    fn argument(&self, original: &str) -> Option<Command> {
+        let words: Vec<&str> = original.split_whitespace().collect();
+        let lower: Vec<String> = words.iter().map(|w| normalize(w)).collect();
+        let verb_len = |verbs: &[String]| {
+            verbs.iter().find_map(|verb| {
+                let parts: Vec<&str> = verb.split(' ').collect();
+                (lower.len() > parts.len() && lower.iter().zip(&parts).all(|(w, p)| w == p)).then_some(parts.len())
+            })
+        };
+        if let Some(n) = verb_len(&self.replace) {
+            for sep in &self.separators {
+                if let Some((from, to)) = split_on_word(&words[n..], sep)
+                    && !from.is_empty()
+                    && !to.is_empty()
+                {
+                    return Some(Command::Replace { from, to });
+                }
+            }
+        }
+        if let Some(n) = verb_len(&self.delete) {
+            return Some(Command::Delete(clean_argument(&words[n..].join(" "))));
+        }
+        if let Some(n) = verb_len(&self.select) {
+            return Some(Command::Select(clean_argument(&words[n..].join(" "))));
+        }
+        None
+    }
+}
 
 /// Lowercases, trims the punctuation recognisers add, and collapses whitespace.
 pub fn normalize(utterance: &str) -> String {
@@ -42,127 +261,17 @@ pub fn normalize(utterance: &str) -> String {
     words.join(" ")
 }
 
-pub fn parse(utterance: &str, require_prefix: bool) -> Option<Command> {
-    let normalized = normalize(utterance);
-    let (prefixed, body) = match PREFIXES
-        .iter()
-        .find_map(|p| normalized.strip_prefix(p).filter(|r| r.is_empty() || r.starts_with(' ')))
-    {
-        Some(rest) => (true, rest.trim().to_string()),
-        None => (false, normalized),
-    };
-    if require_prefix && !prefixed {
-        return None;
-    }
-    parse_body(&body, original_tail(utterance, prefixed))
+fn letters(s: &str) -> Vec<char> {
+    s.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
-/// The utterance with its prefix word removed but casing kept, so replacement text keeps the
-/// speaker's capitalisation.
-fn original_tail(utterance: &str, prefixed: bool) -> String {
-    let trimmed = utterance.trim().trim_end_matches(['.', '!', '?']);
-    if !prefixed {
-        return trimmed.to_string();
+/// Letters of difference tolerated between a phrase and what was heard.
+fn tolerance(len: usize) -> usize {
+    match len {
+        0..=3 => 0,
+        4..=7 => 1,
+        _ => 2,
     }
-    trimmed
-        .split_once(char::is_whitespace)
-        .map(|(_, rest)| rest.trim_start_matches([',', ':']).trim().to_string())
-        .unwrap_or_default()
-}
-
-fn parse_body(body: &str, original: String) -> Option<Command> {
-    use Command::*;
-    let exact = |phrases: &[&str]| phrases.contains(&body);
-    if exact(&["insert", "insert it", "insert text", "paste", "paste it", "indsæt", "sæt ind", "indsæt tekst", "indsæt teksten"]) {
-        return Some(Insert);
-    }
-    if exact(&["copy", "copy it", "copy that", "copy text", "kopier", "kopiér", "kopier det", "kopiér det", "kopier teksten", "kopiér teksten"]) {
-        return Some(Copy);
-    }
-    if exact(&["cancel", "cancel that", "never mind", "nevermind", "annuller", "annullér", "afbryd", "glem det"]) {
-        return Some(Cancel);
-    }
-    if exact(&["stop listening", "pause", "stop med at lytte", "hold pause"]) {
-        return Some(StopListening);
-    }
-    if exact(&["new line", "newline", "line break", "next line", "ny linje", "linjeskift", "næste linje"]) {
-        return Some(NewLine);
-    }
-    if exact(&["new paragraph", "next paragraph", "nyt afsnit", "næste afsnit"]) {
-        return Some(NewParagraph);
-    }
-    if exact(&["undo", "undo that", "fortryd", "fortryd det"]) {
-        return Some(Undo);
-    }
-    if exact(&["redo", "redo that", "gentag", "annuller fortryd", "annullér fortryd"]) {
-        return Some(Redo);
-    }
-    if exact(&["delete that", "scratch that", "strike that", "remove that", "slet det", "slet det der", "fjern det", "slet det sidste"]) {
-        return Some(DeleteThat);
-    }
-    if exact(&["delete last word", "delete the last word", "slet sidste ord", "slet det sidste ord", "fjern sidste ord"]) {
-        return Some(DeleteLastWord);
-    }
-    if exact(&["delete last sentence", "delete the last sentence", "slet sidste sætning", "slet den sidste sætning", "fjern sidste sætning"]) {
-        return Some(DeleteLastSentence);
-    }
-    if exact(&["clear all", "delete all", "delete everything", "clear everything", "slet alt", "ryd alt", "fjern alt", "slet alting"]) {
-        return Some(ClearAll);
-    }
-    if exact(&["select all", "select everything", "marker alt", "markér alt", "vælg alt"]) {
-        return Some(SelectAll);
-    }
-    if exact(&["go to end", "go to the end", "end of text", "gå til slutningen", "gå til enden", "til slutningen"]) {
-        return Some(GoToEnd);
-    }
-    if exact(&["go to start", "go to the start", "go to beginning", "go to the beginning", "gå til starten", "gå til begyndelsen", "til starten"]) {
-        return Some(GoToStart);
-    }
-    let punctuation: &[(&[&str], &'static str)] = &[
-        (&["period", "full stop", "punktum"], "."),
-        (&["comma", "komma"], ","),
-        (&["question mark", "spørgsmålstegn"], "?"),
-        (&["exclamation mark", "exclamation point", "udråbstegn"], "!"),
-        (&["colon", "kolon"], ":"),
-        (&["semicolon", "semikolon"], ";"),
-        (&["dash", "tankestreg"], " –"),
-    ];
-    for (phrases, mark) in punctuation {
-        if phrases.contains(&body) {
-            return Some(Punctuation(mark));
-        }
-    }
-
-    // Commands with an argument. The argument comes from the original utterance so that
-    // replacement text keeps its casing.
-    let words: Vec<&str> = original.split_whitespace().collect();
-    let lower: Vec<String> = words.iter().map(|w| normalize(w)).collect();
-    let starts = |phrase: &[&str]| {
-        lower.len() > phrase.len() && lower.iter().zip(phrase).all(|(w, p)| w == p)
-    };
-    let rest = |n: usize| clean_argument(&words[n..].join(" "));
-
-    for verb in [&["replace"][..], &["change"], &["erstat"], &["ret"], &["skift"], &["udskift"]] {
-        if starts(verb) {
-            for sep in ["with", "to", "med", "til", "ud med"] {
-                if let Some((from, to)) = split_on_word(&words[verb.len()..], sep)
-                    && !from.is_empty() && !to.is_empty() {
-                        return Some(Replace { from, to });
-                    }
-            }
-        }
-    }
-    for verb in [&["delete"][..], &["remove"], &["slet"], &["fjern"]] {
-        if starts(verb) {
-            return Some(Delete(rest(verb.len())));
-        }
-    }
-    for verb in [&["select"][..], &["marker"], &["markér"], &["vælg"]] {
-        if starts(verb) {
-            return Some(Select(rest(verb.len())));
-        }
-    }
-    None
 }
 
 /// Splits `words` at the last occurrence of `sep` (which may be several words).
@@ -188,51 +297,78 @@ fn clean_argument(s: &str) -> String {
 }
 
 #[cfg(test)]
+pub fn grammar(language: Language) -> Grammar {
+    Grammar::new(&preset(language))
+}
+
+#[cfg(test)]
 mod tests {
     use super::Command::*;
+    use super::Mode::{Dictate, Edit};
     use super::*;
 
-    #[test]
-    fn whole_utterance_commands() {
-        assert_eq!(parse("Insert.", false), Some(Insert));
-        assert_eq!(parse("Indsæt!", false), Some(Insert));
-        assert_eq!(parse("Kopiér det.", false), Some(Copy));
-        assert_eq!(parse("Ny linje.", false), Some(NewLine));
-        assert_eq!(parse("New paragraph", false), Some(NewParagraph));
-        assert_eq!(parse("Slet sidste sætning.", false), Some(DeleteLastSentence));
-        assert_eq!(parse("Punktum.", false), Some(Punctuation(".")));
-        assert_eq!(parse("Scratch that.", false), Some(DeleteThat));
+    fn en(s: &str, mode: Mode) -> Option<Command> {
+        grammar(Language::English).parse(s, mode)
+    }
+
+    fn da(s: &str, mode: Mode) -> Option<Command> {
+        grammar(Language::Danish).parse(s, mode)
     }
 
     #[test]
-    fn ordinary_dictation_is_not_a_command() {
-        assert_eq!(parse("Please insert the coin.", false), None);
-        assert_eq!(parse("Jeg skal kopiere filen i morgen.", false), None);
-        assert_eq!(parse("Det var en god pause.", false), None);
+    fn control_commands_while_dictating() {
+        assert_eq!(en("Insert.", Dictate), Some(Insert));
+        assert_eq!(da("Indsæt!", Dictate), Some(Insert));
+        assert_eq!(da("Kopiér det.", Dictate), Some(Copy));
+        assert_eq!(da("Ny linje.", Dictate), Some(NewLine));
+        assert_eq!(da("Punktum.", Dictate), Some(Punctuation(".")));
+        assert_eq!(en("Scratch that.", Dictate), Some(DeleteThat));
+        assert_eq!(da("Redigér.", Dictate), Some(EditMode));
     }
 
     #[test]
-    fn arguments_keep_casing() {
-        assert_eq!(
-            parse("Replace Monday with Tuesday.", false),
-            Some(Replace { from: "Monday".into(), to: "Tuesday".into() })
-        );
-        assert_eq!(
-            parse("Erstat hund med kat.", false),
-            Some(Replace { from: "hund".into(), to: "kat".into() })
-        );
-        assert_eq!(
-            parse("Ret mandag til tirsdag.", false),
-            Some(Replace { from: "mandag".into(), to: "tirsdag".into() })
-        );
-        assert_eq!(parse("Slet meget.", false), Some(Delete("meget".into())));
-        assert_eq!(parse("Markér den røde bil.", false), Some(Select("den røde bil".into())));
+    fn only_the_chosen_language_counts() {
+        assert_eq!(en("Indsæt.", Dictate), None);
+        assert_eq!(da("Insert.", Dictate), None);
     }
 
     #[test]
-    fn prefix() {
-        assert_eq!(parse("Insert.", true), None);
-        assert_eq!(parse("Kommando, indsæt.", true), Some(Insert));
-        assert_eq!(parse("Command replace a with b", true), Some(Replace { from: "a".into(), to: "b".into() }));
+    fn lone_words_match_loosely() {
+        assert_eq!(en("Inset.", Dictate), Some(Insert));
+        assert_eq!(en("Kancel.", Dictate), Some(Cancel));
+        assert_eq!(da("Indsæt", Dictate), Some(Insert));
+        assert_eq!(da("Annuler", Dictate), Some(Cancel));
+        assert_eq!(da("Kopier", Dictate), Some(Copy));
+    }
+
+    #[test]
+    fn dictation_is_left_alone() {
+        assert_eq!(en("Please insert the coin.", Dictate), None);
+        assert_eq!(da("Jeg skal kopiere filen i morgen.", Dictate), None);
+        assert_eq!(da("Det var en god pause.", Dictate), None);
+        assert_eq!(da("Hej.", Dictate), None);
+        assert_eq!(da("Slet meget.", Dictate), None, "editing needs edit mode");
+    }
+
+    #[test]
+    fn editing_commands() {
+        assert_eq!(en("Replace Monday with Tuesday.", Edit), Some(Replace { from: "Monday".into(), to: "Tuesday".into() }));
+        assert_eq!(da("Erstat hund med kat.", Edit), Some(Replace { from: "hund".into(), to: "kat".into() }));
+        assert_eq!(da("Ret mandag til tirsdag.", Edit), Some(Replace { from: "mandag".into(), to: "tirsdag".into() }));
+        assert_eq!(da("Slet meget.", Edit), Some(Delete("meget".into())));
+        assert_eq!(da("Markér den røde bil.", Edit), Some(Select("den røde bil".into())));
+        assert_eq!(da("Slet sidste sætning.", Edit), Some(DeleteLastSentence));
+        assert_eq!(da("Diktér.", Edit), Some(DictateMode));
+        assert_eq!(en("Something else entirely", Edit), None);
+    }
+
+    #[test]
+    fn custom_phrases() {
+        let mut phrases = preset(Language::Danish);
+        phrases.insert("insert".into(), "send den, afsted".into());
+        let g = Grammar::new(&phrases);
+        assert_eq!(g.parse("Afsted!", Dictate), Some(Insert));
+        assert_eq!(g.parse("Send den.", Dictate), Some(Insert));
+        assert_eq!(g.parse("Indsæt.", Dictate), None);
     }
 }

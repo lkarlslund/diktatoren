@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use crate::commands::Command;
+use crate::commands::{Command, Mode};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Snapshot {
@@ -19,6 +19,7 @@ pub enum Outcome {
     Copy,
     Cancel,
     StopListening,
+    SwitchMode(Mode),
     /// The command had nothing to act on, such as deleting a word that is not there.
     NotFound,
 }
@@ -116,6 +117,8 @@ impl Document {
             Copy => return Outcome::Copy,
             Cancel => return Outcome::Cancel,
             StopListening => return Outcome::StopListening,
+            EditMode => return Outcome::SwitchMode(Mode::Edit),
+            DictateMode => return Outcome::SwitchMode(Mode::Dictate),
             Undo => {
                 let Some(prev) = self.undo.pop() else { return Outcome::NotFound };
                 self.redo.push(self.snapshot());
@@ -324,12 +327,23 @@ pub fn find_last(haystack: &str, needle: &str) -> Option<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::parse;
+    use crate::commands::{Grammar, Language, Mode, preset};
+
+    /// English and Danish phrases at once, since the tests mix them.
+    fn both() -> Grammar {
+        let danish = preset(Language::Danish);
+        let mut phrases = preset(Language::English);
+        for (key, value) in phrases.iter_mut() {
+            *value = format!("{value}, {}", danish[key]);
+        }
+        Grammar::new(&phrases)
+    }
 
     fn doc(parts: &[&str]) -> Document {
+        let grammar = both();
         let mut d = Document::default();
         for p in parts {
-            match parse(p, false) {
+            match grammar.parse(p, Mode::Edit) {
                 Some(c) => {
                     d.apply(&c);
                 }

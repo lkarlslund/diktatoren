@@ -167,11 +167,20 @@ fn listen(mut settings: Settings, input: Option<&String>) -> Result<()> {
         handle.send(engine::Command::Listen { from_wake: false });
     }
     let mut doc = document::Document::default();
+    let mut mode = commands::Mode::Dictate;
+    let grammar = settings.grammar();
     for event in rx {
         match event {
             engine::Event::Utterance(text) => {
-                match commands::parse(&text, settings.require_command_prefix) {
-                    Some(c) => eprintln!("[command {c:?} -> {:?}]", doc.apply(&c)),
+                match grammar.parse(&text, mode) {
+                    Some(c) => {
+                        let outcome = doc.apply(&c);
+                        if let document::Outcome::SwitchMode(m) = outcome {
+                            mode = m;
+                        }
+                        eprintln!("[command {c:?} -> {outcome:?}]");
+                    }
+                    None if mode == commands::Mode::Edit => eprintln!("[not a command: {text}]"),
                     None => doc.dictate(&text),
                 }
                 println!("{}", doc.text());

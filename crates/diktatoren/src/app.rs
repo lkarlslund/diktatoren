@@ -14,7 +14,7 @@ use iced::{Alignment, Element, Font, Length, Size, Subscription, Task, keyboard,
 
 use crate::bus::{self, Action, BusEvent};
 use crate::catalog::{self, Task as ModelTask};
-use crate::commands;
+use crate::commands::{self, Language, Mode};
 use crate::config::{FinishAction, HotkeyMode, InsertMethod, Settings};
 use crate::document::{Document, Outcome};
 use crate::download::{self, Progress};
@@ -56,6 +56,7 @@ enum Message {
     Edit(text_editor::Action),
     Finish(Finish),
     ToggleListening,
+    SetMode(Mode),
     WindowClosed(window::Id),
     CloseRequested(window::Id),
     Deliver(String, Target),
@@ -82,7 +83,8 @@ enum SettingsMessage {
     PasteShortcut(String),
     RestoreClipboard(bool),
     VoiceCommands(bool),
-    RequirePrefix(bool),
+    CommandLanguage(Language),
+    Phrase(&'static str, String),
     Save,
     Close,
 }
@@ -111,6 +113,7 @@ struct Popup {
     preview: String,
     notice: Option<String>,
     target: Target,
+    mode: Mode,
 }
 
 struct SettingsWindow {
@@ -134,6 +137,7 @@ struct App {
     available: Vec<String>,
     downloads: HashMap<String, (Progress, Arc<AtomicBool>)>,
     status: String,
+    grammar: commands::Grammar,
     listening: bool,
     level: f32,
 }
@@ -143,6 +147,7 @@ impl App {
         let sink: engine::Sink = Arc::new(|event| bus::send(BusEvent::Engine(event)));
         let engine = engine::spawn(settings.clone(), sink);
         let available = audiocpp::Registry::new().map(|r| r.families()).unwrap_or_default();
+        let grammar = settings.grammar();
         let app = App {
             settings,
             engine,
@@ -154,6 +159,7 @@ impl App {
             available,
             downloads: HashMap::new(),
             status: "Starting…".into(),
+            grammar,
             listening: false,
             level: 0.0,
         };
@@ -210,6 +216,13 @@ impl App {
                 Task::none()
             }
             Message::Finish(finish) => self.finish(finish),
+            Message::SetMode(mode) => {
+                if let Some(p) = &mut self.popup {
+                    p.mode = mode;
+                    p.notice = None;
+                }
+                self.focus_popup()
+            }
             Message::ToggleListening => {
                 if self.listening {
                     self.engine.send(EngineCommand::StopListening);
@@ -355,24 +368,35 @@ impl App {
 
     fn utterance(&mut self, spoken: String) -> Task<Message> {
         let commands_enabled = self.settings.voice_commands;
-        let require_prefix = self.settings.require_command_prefix;
         let Some(p) = &mut self.popup else { return Task::none() };
         p.preview.clear();
         if spoken.trim().is_empty() {
             return Task::none();
         }
-        let command = commands_enabled.then(|| commands::parse(&spoken, require_prefix)).flatten();
+        let mode = if commands_enabled { p.mode } else { Mode::Dictate };
+        let command = commands_enabled.then(|| self.grammar.parse(&spoken, mode)).flatten();
+        p.notice = None;
         let outcome = match command {
             Some(c) => {
                 log::info!("voice command {c:?}");
                 p.doc.apply(&c)
+            }
+            // While editing, speech that is no command replaces the selection, if any.
+            None if mode == Mode::Edit && p.doc.selection().is_empty() => {
+                p.notice = Some(format!("“{spoken}” is not an edit command. Say “dictate” or “diktér” to write."));
+                Outcome::Edited
             }
             None => {
                 p.doc.dictate(&spoken);
                 Outcome::Edited
             }
         };
-        p.notice = (outcome == Outcome::NotFound).then(|| format!("Nothing to change for “{spoken}”"));
+        if outcome == Outcome::NotFound {
+            p.notice = Some(format!("Nothing to change for “{spoken}”"));
+        }
+        if let Outcome::SwitchMode(m) = outcome {
+            p.mode = m;
+        }
         sync_editor(p);
         match outcome {
             Outcome::Insert => self.finish(Finish::Insert),
@@ -382,7 +406,7 @@ impl App {
                 self.engine.send(EngineCommand::StopListening);
                 Task::none()
             }
-            Outcome::Edited | Outcome::NotFound => Task::none(),
+            Outcome::Edited | Outcome::NotFound | Outcome::SwitchMode(_) => Task::none(),
         }
     }
 
@@ -441,6 +465,7 @@ impl App {
             preview: String::new(),
             notice: None,
             target,
+            mode: Mode::Dictate,
         });
         open.then(move |id| {
             Task::batch([window::gain_focus(id), iced::widget::operation::focus(EDITOR)])
@@ -551,10 +576,24 @@ impl App {
             M::PasteShortcut(s) => d.paste_shortcut = s,
             M::RestoreClipboard(on) => d.restore_clipboard = on,
             M::VoiceCommands(on) => d.voice_commands = on,
-            M::RequirePrefix(on) => d.require_command_prefix = on,
+            M::CommandLanguage(language) => {
+                d.command_phrases = d.command_phrases();
+                d.command_language = language;
+                if language != Language::Custom {
+                    d.command_phrases.clear();
+                }
+            }
+            M::Phrase(key, phrases) => {
+                if d.command_language != Language::Custom {
+                    d.command_phrases = d.command_phrases();
+                    d.command_language = Language::Custom;
+                }
+                d.command_phrases.insert(key.to_string(), phrases);
+            }
             M::Save => {
                 let hotkey_changed = d.hotkey != self.settings.hotkey;
                 self.settings = d.clone();
+                self.grammar = self.settings.grammar();
                 w.saved_at = Some(Instant::now());
                 if let Err(e) = self.settings.save() {
                     self.status = format!("Saving settings: {e:#}");
@@ -632,11 +671,18 @@ impl App {
             });
 
         let state = if self.listening { "Listening" } else { "Paused" };
+        let mode_button = |label: &'static str, mode: Mode| {
+            button(text(label).size(13))
+                .padding([3, 10])
+                .on_press(Message::SetMode(mode))
+                .style(if p.mode == mode { button::primary } else { button::secondary })
+        };
         let header = row![
             text(state).size(14),
             progress_bar(0.0..=1.0, if self.listening { self.level } else { 0.0 })
                 .length(Length::Fixed(120.0))
                 .girth(6),
+            row![mode_button("Dictate", Mode::Dictate), mode_button("Edit", Mode::Edit)].spacing(2),
             space::horizontal(),
             text(&self.status).size(12),
         ]
@@ -875,35 +921,33 @@ fn output_page(d: &Settings) -> Element<'_, SettingsMessage> {
 
 fn commands_page(d: &Settings) -> Element<'_, SettingsMessage> {
     use SettingsMessage as M;
-    let rows: &[(&str, &str)] = &[
-        ("Insert · Indsæt", "insert the text into the window"),
-        ("Copy · Kopiér", "copy the text to the clipboard"),
-        ("Cancel · Annuller", "close without doing anything"),
-        ("Pause · Stop med at lytte", "stop listening"),
-        ("New line · Ny linje", "line break"),
-        ("New paragraph · Nyt afsnit", "blank line"),
-        ("Period, comma, question mark … · Punktum, komma, spørgsmålstegn …", "punctuation"),
-        ("Undo · Fortryd   /   Redo · Gentag", "undo or redo the last change"),
-        ("Delete that · Slet det", "remove the selection or the last dictated piece"),
-        ("Delete last word / sentence · Slet sidste ord / sætning", ""),
-        ("Delete X · Slet X", "remove the last occurrence of X"),
-        ("Replace X with Y · Erstat X med Y · Ret X til Y", "fix a word"),
-        ("Select X · Markér X", "select X; what you say next replaces it"),
-        ("Select all · Markér alt   /   Clear all · Slet alt", ""),
-        ("Go to end / start · Gå til slutningen / starten", "move the cursor"),
-    ];
-    let mut list = column![].spacing(6);
-    for (phrase, meaning) in rows {
-        list = list.push(row![text(*phrase).size(14).width(Length::FillPortion(3)), text(*meaning).size(13).width(Length::FillPortion(2))].spacing(10));
-    }
+    let phrases = d.command_phrases();
+    let languages = [Language::English, Language::Danish, Language::Custom];
+    let list = |control: bool| {
+        let mut list = column![].spacing(6);
+        for spec in commands::specs().into_iter().filter(|s| s.control == control) {
+            let key = spec.key;
+            let value = phrases.get(key).cloned().unwrap_or_default();
+            list = list.push(
+                row![
+                    text(spec.label).size(14).width(230),
+                    text_input("", &value).on_input(move |v| M::Phrase(key, v)).size(14),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
+        }
+        list
+    };
     column![
-        section("Editing by voice"),
         checkbox(d.voice_commands).label("Recognise voice commands").on_toggle(M::VoiceCommands),
-        checkbox(d.require_command_prefix)
-            .label("Only after saying “command” or “kommando” first")
-            .on_toggle(M::RequirePrefix),
-        hint("A command must be said on its own, with a short pause before and after. Dictated text lands at the cursor; click or select text in the box (or say “select …”) to change where it goes."),
-        list,
+        labeled("Language", pick_list(languages, Some(d.command_language), M::CommandLanguage).width(200)),
+        hint("Say a command on its own, with a short pause before and after. Each command takes the phrases listed, separated by commas; editing one makes the set Custom. The dictation window has two modes, switched by voice or with its Dictate / Edit buttons."),
+        section("In both modes"),
+        list(true),
+        section("In Edit mode"),
+        hint("While editing, nothing you say is written as text unless something is selected. “Replace mandag med tirsdag” combines a replace verb and a separator."),
+        list(false),
     ]
     .spacing(10)
     .into()

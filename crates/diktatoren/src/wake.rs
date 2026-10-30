@@ -10,7 +10,7 @@ fn letters(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
-fn levenshtein(a: &[char], b: &[char]) -> usize {
+pub fn levenshtein(a: &[char], b: &[char]) -> usize {
     let mut prev: Vec<usize> = (0..=b.len()).collect();
     for (i, ca) in a.iter().enumerate() {
         let mut row = vec![i + 1];
