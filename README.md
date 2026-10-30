@@ -139,5 +139,6 @@ weights, recordings and personal data out of the repository. Enable the hook wit
 
 ## License
 
-MIT, see [LICENSE](LICENSE). audio.cpp is MIT licensed. Downloaded models keep the license
+MIT, see [LICENSE](LICENSE). audio.cpp, which release builds bundle, is licensed under
+Apache-2.0; its license ships beside it as `LICENSE-audio.cpp`. Downloaded models keep the license
 of their original release; the model pages on Hugging Face list them.

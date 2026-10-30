@@ -81,6 +81,7 @@ jobs:
           mkdir -p "dist/$name"
           cp -r target/release/models "dist/$name/"
           cp LICENSE README.md "dist/$name/"
+          cp third_party/audio.cpp/LICENSE "dist/$name/LICENSE-audio.cpp"
           case "${{ runner.os }}" in
             Linux)
               cp target/release/diktatoren target/release/libaudiocpp.so.0 "dist/$name/"
