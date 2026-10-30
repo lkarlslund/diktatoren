@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Name=Diktatoren
+GenericName=Dictation
+Comment=Local dictation with a wake word or hotkey
+Exec=diktatoren
+Icon=diktatoren
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=dictation;speech;voice;transcription;diktat;
+StartupNotify=false
+X-KDE-Shortcuts=
+Actions=Toggle;Settings;
+
+[Desktop Action Toggle]
+Name=Start or stop dictation
+Exec=diktatoren toggle
+
+[Desktop Action Settings]
+Name=Settings
+Exec=diktatoren settings

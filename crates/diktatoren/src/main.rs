@@ -48,7 +48,7 @@ Models and testing:
 ";
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,diktatoren=info")).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let settings = Settings::load();
     let command = args.first().map(String::as_str);
