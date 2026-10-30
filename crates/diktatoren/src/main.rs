@@ -1,6 +1,7 @@
 mod catalog;
 mod commands;
 mod config;
+mod document;
 mod download;
 mod resample;
 
