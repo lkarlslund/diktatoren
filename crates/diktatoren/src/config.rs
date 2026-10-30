@@ -11,8 +11,11 @@ pub fn project_dirs() -> ProjectDirs {
     ProjectDirs::from("", "", "diktatoren").expect("no home directory")
 }
 
+/// `DIKTATOREN_CONFIG` overrides the location, which keeps test runs away from real settings.
 pub fn config_path() -> PathBuf {
-    project_dirs().config_dir().join("config.toml")
+    std::env::var_os("DIKTATOREN_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_dirs().config_dir().join("config.toml"))
 }
 
 pub fn default_models_dir() -> PathBuf {
@@ -50,7 +53,9 @@ pub struct Settings {
     pub hotkey: String,
     pub hotkey_mode: HotkeyMode,
     pub wake_word_enabled: bool,
+    /// A wake-word model package, or "phrase" for `wake_phrase`.
     pub wake_word_package: String,
+    pub wake_phrase: String,
     pub wake_word_threshold: f32,
     pub asr_package: String,
     /// Language code passed to models that take one, or empty for the model default.
@@ -81,7 +86,8 @@ impl Default for Settings {
                 .into(),
             hotkey_mode: HotkeyMode::Toggle,
             wake_word_enabled: false,
-            wake_word_package: "micro_wake_word_okay_nabu_f32".into(),
+            wake_word_package: crate::wake::PHRASE.into(),
+            wake_phrase: "Hey Diktatoren".into(),
             wake_word_threshold: 0.0,
             asr_package: "parakeet_tdt_q8_0".into(),
             language: String::new(),

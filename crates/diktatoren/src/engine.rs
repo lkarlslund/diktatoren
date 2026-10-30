@@ -2,6 +2,9 @@
 //! detection; finished utterances go to a recogniser thread.
 //!
 //! The microphone is only open while listening, or while idle when the wake word is enabled.
+//!
+//! A wake word is either a dedicated detector model, or a phrase of the user's choosing: then
+//! short idle utterances are recognised locally, compared with the phrase and discarded.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -16,10 +19,13 @@ use audiocpp::{Backend, Mode, Model, Registry, Session, VoiceActivityKind};
 use crate::audio::{self, Capture, SAMPLE_RATE};
 use crate::catalog::{self, Task};
 use crate::config::Settings;
+use crate::wake;
 
 const RATE: i32 = SAMPLE_RATE as i32;
 /// Audio kept before the detected speech start.
 const PREROLL: usize = SAMPLE_RATE as usize * 3 / 10;
+/// Idle utterances longer than this cannot be a wake phrase.
+const MAX_WAKE_UTTERANCE: usize = SAMPLE_RATE as usize * 8;
 /// Utterances longer than this are cut and recognised in pieces.
 const MAX_UTTERANCE: usize = SAMPLE_RATE as usize * 25;
 /// How often a live preview of the utterance in progress is recognised.
@@ -71,7 +77,10 @@ pub fn spawn(settings: Settings, sink: Sink) -> Handle {
     handle.send(Command::Configure(Box::new(settings)));
     thread::Builder::new()
         .name("engine".into())
-        .spawn(move || Engine::new(sink).run(rx))
+        .spawn({
+            let tx = handle.tx.clone();
+            move || Engine::new(sink, tx).run(rx)
+        })
         .expect("spawning engine thread");
     handle
 }
@@ -98,7 +107,24 @@ struct Loaded {
     settings: Settings,
     vad: Session,
     vad_chunk: usize,
-    wake: Option<(Session, usize)>,
+    wake: Option<Wake>,
+}
+
+enum Wake {
+    /// A detector model and its preferred chunk size.
+    Model(Session, usize),
+    Phrase(String),
+}
+
+/// Idle segmentation for the spoken wake phrase.
+#[derive(Default)]
+struct Idle {
+    audio: Vec<f32>,
+    /// Stream position of `audio[0]`.
+    offset: usize,
+    vad_pos: i64,
+    vad_pending: Vec<f32>,
+    speech_start: Option<usize>,
 }
 
 struct Engine {
@@ -110,6 +136,8 @@ struct Engine {
     audio_tx: mpsc::Sender<Vec<f32>>,
     audio_rx: mpsc::Receiver<Vec<f32>>,
     listening: Option<Listening>,
+    idle: Option<Idle>,
+    commands: mpsc::Sender<Command>,
     wake_pos: i64,
     wake_pending: Vec<f32>,
 }
@@ -129,7 +157,7 @@ struct Listening {
 }
 
 impl Engine {
-    fn new(sink: Sink) -> Self {
+    fn new(sink: Sink, commands: mpsc::Sender<Command>) -> Self {
         let (audio_tx, audio_rx) = mpsc::channel();
         Engine {
             sink,
@@ -140,6 +168,8 @@ impl Engine {
             audio_tx,
             audio_rx,
             listening: None,
+            idle: None,
+            commands,
             wake_pos: 0,
             wake_pending: Vec::new(),
         }
@@ -224,6 +254,7 @@ impl Engine {
         let wake_unchanged = previous.as_ref().is_some_and(|p| {
             p.wake_word_package == settings.wake_word_package
                 && p.wake_word_threshold == settings.wake_word_threshold
+                && p.wake_phrase == settings.wake_phrase
                 && p.models_dir() == settings.models_dir()
         }) && wake.is_some() == settings.wake_word_enabled;
         let wake = if wake_unchanged {
@@ -244,16 +275,47 @@ impl Engine {
             previous.as_ref().is_some_and(|p| p.input_device != settings.input_device);
         self.loaded = Some(Loaded { settings, vad, vad_chunk, wake });
         self.reload_recogniser();
+        if self.phrase().is_some() && self.recogniser.is_none() {
+            self.emit(Event::Error("A spoken wake phrase needs a speech model.".into()));
+        }
         if microphone_changed {
             self.capture = None;
         }
+        self.start_idle();
         self.update_microphone();
         Ok(())
     }
 
-    fn load_wake(&self, s: &Settings) -> Result<Option<(Session, usize)>> {
+    fn phrase(&self) -> Option<&str> {
+        match self.loaded.as_ref()?.wake.as_ref()? {
+            Wake::Phrase(p) => Some(p),
+            Wake::Model(..) => None,
+        }
+    }
+
+    /// Starts idle segmentation when waiting for a spoken wake phrase.
+    fn start_idle(&mut self) {
+        self.idle = None;
+        if self.listening.is_some() || self.phrase().is_none() {
+            return;
+        }
+        let loaded = self.loaded.as_mut().unwrap();
+        let options = [("min_silence_duration_ms", "400"), ("speech_pad_ms", "150")];
+        match loaded.vad.stream_start(RATE, &options) {
+            Ok(()) => self.idle = Some(Idle::default()),
+            Err(e) => self.emit(Event::Error(format!("voice detection: {e}"))),
+        }
+    }
+
+    fn load_wake(&self, s: &Settings) -> Result<Option<Wake>> {
         if !s.wake_word_enabled {
             return Ok(None);
+        }
+        if s.wake_word_package == wake::PHRASE {
+            if s.wake_phrase.trim().is_empty() {
+                return Err(anyhow!("the wake phrase is empty"));
+            }
+            return Ok(Some(Wake::Phrase(s.wake_phrase.trim().to_string())));
         }
         let (family, package) = catalog::find(&s.wake_word_package)
             .ok_or_else(|| anyhow!("unknown wake word model {}", s.wake_word_package))?;
@@ -269,7 +331,7 @@ impl Engine {
         let threshold = (s.wake_word_threshold > 0.0).then(|| s.wake_word_threshold.to_string());
         let options: Vec<(&str, &str)> = threshold.iter().map(|t| ("threshold", t.as_str())).collect();
         session.stream_start(RATE, &options)?;
-        Ok(Some((session, chunk)))
+        Ok(Some(Wake::Model(session, chunk)))
     }
 
     fn reload_recogniser(&mut self) {
@@ -303,6 +365,7 @@ impl Engine {
             backend,
             package.name.clone(),
             self.sink.clone(),
+            self.commands.clone(),
         ));
     }
 
@@ -344,6 +407,7 @@ impl Engine {
             &[("min_silence_duration_ms", silence.as_str()), ("speech_pad_ms", "150")],
         )?;
         let now = Instant::now();
+        self.idle = None;
         self.listening = Some(Listening {
             from_wake,
             audio: Vec::new(),
@@ -370,6 +434,7 @@ impl Engine {
             let _ = l.vad.stream_finish();
         }
         self.emit(Event::Listening(false));
+        self.start_idle();
         self.update_microphone();
     }
 
@@ -401,9 +466,12 @@ impl Engine {
         if !self.wake_active() {
             return Ok(());
         }
+        if self.phrase().is_some() {
+            return self.process_idle(block);
+        }
         self.wake_pending.extend_from_slice(&block);
         let loaded = self.loaded.as_mut().unwrap();
-        let (session, chunk) = loaded.wake.as_mut().unwrap();
+        let Some(Wake::Model(session, chunk)) = loaded.wake.as_mut() else { return Ok(()) };
         let chunk = *chunk;
         let mut detected = false;
         while self.wake_pending.len() >= chunk {
@@ -427,6 +495,62 @@ impl Engine {
             self.wake_pending.clear();
             self.emit(Event::WakeWord);
             self.start_listening(true)?;
+        }
+        Ok(())
+    }
+
+    /// Cuts idle speech into utterances and hands short ones over to be checked for the phrase.
+    fn process_idle(&mut self, block: Vec<f32>) -> Result<()> {
+        let phrase = self.phrase().unwrap_or_default().to_string();
+        let (Some(loaded), Some(idle)) = (self.loaded.as_mut(), self.idle.as_mut()) else {
+            return Ok(());
+        };
+        idle.audio.extend_from_slice(&block);
+        idle.vad_pending.extend_from_slice(&block);
+        let chunk = loaded.vad_chunk;
+        let mut finished = Vec::new();
+        while idle.vad_pending.len() >= chunk {
+            let piece: Vec<f32> = idle.vad_pending.drain(..chunk).collect();
+            let event = loaded.vad.stream_push(&piece, RATE, idle.vad_pos)?;
+            idle.vad_pos += chunk as i64;
+            let mut events: Vec<_> = event.into_iter().collect();
+            while let Some(e) = loaded.vad.stream_next_event()? {
+                events.push(e);
+            }
+            for activity in events.iter().flat_map(|e| e.voice_activity.iter()) {
+                let at = activity.sample.max(0) as usize;
+                match activity.kind {
+                    VoiceActivityKind::SpeechStart => {
+                        idle.speech_start.get_or_insert(at);
+                    }
+                    VoiceActivityKind::SpeechEnd => {
+                        if let Some(start) = idle.speech_start.take() {
+                            finished.push((start, at));
+                        }
+                    }
+                    VoiceActivityKind::SpeechSegment => {}
+                }
+            }
+        }
+        let end_of_audio = idle.offset + idle.audio.len();
+        for (start, end) in finished {
+            let from = start.saturating_sub(PREROLL).max(idle.offset) - idle.offset;
+            let to = end.min(end_of_audio) - idle.offset;
+            let length = to.saturating_sub(from);
+            if length > SAMPLE_RATE as usize / 4 && length <= MAX_WAKE_UTTERANCE {
+                if let Some(r) = &self.recogniser {
+                    r.submit(Job::Wake(idle.audio[from..to].to_vec(), phrase.clone()));
+                }
+            }
+        }
+        // Long speech is not a wake phrase; stop holding on to it.
+        if idle.speech_start.is_some_and(|s| end_of_audio - s > MAX_WAKE_UTTERANCE) {
+            idle.speech_start = None;
+        }
+        let keep_from = idle.speech_start.map_or(end_of_audio, |s| s).saturating_sub(PREROLL);
+        if keep_from > idle.offset {
+            idle.audio.drain(..keep_from - idle.offset);
+            idle.offset = keep_from;
         }
         Ok(())
     }
@@ -509,6 +633,8 @@ fn backend(settings: &Settings) -> Backend {
 enum Job {
     Final(Vec<f32>),
     Preview(Vec<f32>),
+    /// Idle speech to compare with the wake phrase.
+    Wake(Vec<f32>, String),
 }
 
 #[derive(Default)]
@@ -516,6 +642,7 @@ struct Queue {
     finals: VecDeque<Vec<f32>>,
     /// Only the newest preview is worth running.
     preview: Option<Vec<f32>>,
+    wake: Option<(Vec<f32>, String)>,
     closed: bool,
 }
 
@@ -534,6 +661,7 @@ impl Recogniser {
         backend: Backend,
         name: String,
         sink: Sink,
+        commands: mpsc::Sender<Command>,
     ) -> Self {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let worker_queue = queue.clone();
@@ -584,6 +712,9 @@ impl Recogniser {
                             if let Some(f) = q.finals.pop_front() {
                                 break Job::Final(f);
                             }
+                            if let Some((w, phrase)) = q.wake.take() {
+                                break Job::Wake(w, phrase);
+                            }
                             if let Some(p) = q.preview.take() {
                                 break Job::Preview(p);
                             }
@@ -593,6 +724,21 @@ impl Recogniser {
                     let (samples, is_final) = match job {
                         Job::Final(s) => (s, true),
                         Job::Preview(s) => (s, false),
+                        Job::Wake(samples, phrase) => {
+                            let heard = session
+                                .run(&samples, RATE, &options)
+                                .map(|r| r.text.unwrap_or_default())
+                                .unwrap_or_default();
+                            if let Some(rest) = wake::match_phrase(&heard, &phrase) {
+                                log::info!("wake phrase heard");
+                                sink(Event::WakeWord);
+                                let _ = commands.send(Command::Listen { from_wake: true });
+                                if !rest.is_empty() {
+                                    sink(Event::Utterance(rest));
+                                }
+                            }
+                            continue;
+                        }
                     };
                     let started = Instant::now();
                     match session.run(&samples, RATE, &options) {
@@ -629,6 +775,8 @@ impl Recogniser {
                 q.finals.push_back(s);
             }
             Job::Preview(s) => q.preview = Some(s),
+            // Only the latest idle utterance matters if recognition falls behind.
+            Job::Wake(s, phrase) => q.wake = Some((s, phrase)),
         }
         cvar.notify_one();
     }

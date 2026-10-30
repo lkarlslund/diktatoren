@@ -23,6 +23,7 @@ use crate::hotkey::{self, Hotkeys};
 use crate::icon::{self, State as IconState};
 use crate::output::{self, Clipboard, Target};
 use crate::tray::Tray;
+use crate::wake;
 
 const EDITOR: &str = "dictation";
 
@@ -70,6 +71,7 @@ enum SettingsMessage {
     HotkeyMode(HotkeyMode),
     WakeEnabled(bool),
     WakePackage(Choice),
+    WakePhrase(String),
     WakeThreshold(f32),
     WakeTimeout(f32),
     Microphone(Choice),
@@ -534,6 +536,7 @@ impl App {
             M::HotkeyMode(m) => d.hotkey_mode = m,
             M::WakeEnabled(on) => d.wake_word_enabled = on,
             M::WakePackage(c) => d.wake_word_package = c.id,
+            M::WakePhrase(s) => d.wake_phrase = s,
             M::WakeThreshold(t) => d.wake_word_threshold = t,
             M::WakeTimeout(t) => d.wake_listen_timeout_s = t as u32,
             M::Microphone(c) => d.input_device = c.id,
@@ -738,8 +741,28 @@ impl App {
         } else {
             "For example Ctrl+Alt+Space, Super+D or F9."
         };
-        let wake_packages = self.installed_choices(ModelTask::WakeWord);
+        let mut wake_packages = vec![choice(wake::PHRASE, "Spoken phrase (your own words)")];
+        wake_packages.extend(self.installed_choices(ModelTask::WakeWord));
         let wake_selected = wake_packages.iter().find(|c| c.id == d.wake_word_package).cloned();
+        let phrase_mode = d.wake_word_package == wake::PHRASE;
+        let sensitivity: Element<'_, SettingsMessage> = if phrase_mode {
+            space().into()
+        } else {
+            labeled(
+                    "Sensitivity",
+                    row![
+                        slider(0.0..=0.99, d.wake_word_threshold, M::WakeThreshold).step(0.01).width(200),
+                        text(if d.wake_word_threshold == 0.0 {
+                            "model default".to_string()
+                        } else {
+                            format!("threshold {:.2}", d.wake_word_threshold)
+                        })
+                        .size(13)
+                    ]
+                    .spacing(10),
+                )
+            .into()
+        };
         let mut mics = vec![choice("", "System default")];
         mics.extend(w.microphones.iter().map(|m| choice(m, m)));
         let mic_selected = mics.iter().find(|c| c.id == d.input_device).cloned();
@@ -754,25 +777,18 @@ impl App {
             ),
             hint("Toggle: press to start, press again to stop. Push to talk: listens while held."),
             checkbox(d.wake_word_enabled).label("Start dictation with a wake word").on_toggle(M::WakeEnabled),
-            labeled(
-                "Wake word",
-                pick_list(wake_packages, wake_selected, M::WakePackage)
-                    .placeholder("Download one under Models")
-                    .width(320),
-            ),
-            labeled(
-                "Sensitivity",
-                row![
-                    slider(0.0..=0.99, d.wake_word_threshold, M::WakeThreshold).step(0.01).width(200),
-                    text(if d.wake_word_threshold == 0.0 {
-                        "model default".to_string()
-                    } else {
-                        format!("threshold {:.2}", d.wake_word_threshold)
-                    })
-                    .size(13)
+            labeled("Wake word", pick_list(wake_packages, wake_selected, M::WakePackage).width(320)),
+            if phrase_mode {
+                column![
+                    labeled("Phrase", text_input("Hey Diktatoren", &d.wake_phrase).on_input(M::WakePhrase).width(320)),
+                    hint("Say the phrase on its own, or go straight on: “Hey Diktatoren, remind me to …”. While waiting, short utterances are recognised on this computer with your speech model, compared with the phrase and discarded."),
                 ]
-                .spacing(10),
-            ),
+                .spacing(10)
+                .into()
+            } else {
+                hint::<SettingsMessage>("Wake-word models listen for one fixed phrase and use very little power. Download them under Models.")
+            },
+            sensitivity,
             labeled(
                 "Stop after silence",
                 row![

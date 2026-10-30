@@ -20,6 +20,7 @@ mod output;
 mod portal;
 mod resample;
 mod tray;
+mod wake;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;

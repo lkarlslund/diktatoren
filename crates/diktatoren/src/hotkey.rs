@@ -41,9 +41,12 @@ impl Hotkeys {
     }
 
     pub fn bind(&mut self, spec: &str) -> Result<()> {
-        if is_wayland() {
+        if is_wayland() && !spec.trim().is_empty() {
             #[cfg(target_os = "linux")]
             crate::portal::bind_shortcut(spec);
+            return Ok(());
+        }
+        if is_wayland() {
             return Ok(());
         }
         let Some(manager) = &self.manager else {
