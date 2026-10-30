@@ -47,6 +47,17 @@ impl Document {
         self.selection.clone()
     }
 
+    /// Takes the text and selection of a field in another application, which may have changed
+    /// since the last look. Unchanged text keeps the undo history and the untidied stretch.
+    pub fn sync_from(&mut self, text: String, selection: Range<usize>) {
+        if text != self.text {
+            self.last_insert = None;
+            self.untidy = None;
+        }
+        self.text = text;
+        self.selection = clamp(&self.text, selection);
+    }
+
     /// Replaces the whole state after the user edited the text by hand.
     pub fn set_from_editor(&mut self, text: String, selection: Range<usize>) {
         if text != self.text {

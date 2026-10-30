@@ -128,6 +128,9 @@ struct Popup {
     tidying: bool,
     /// Finishing waits for the tidy-up to come back.
     waiting: Option<Finish>,
+    /// Dictating straight into a text field of another application, with its text as it was
+    /// when the session started (for cancelling).
+    inline: Option<(crate::a11y::Target, String)>,
 }
 
 struct SettingsWindow {
@@ -209,6 +212,7 @@ impl App {
         match message {
             Message::Init(initial) => {
                 self.tray = Some(Tray::new());
+                crate::a11y::start();
                 self.clipboard = Some(Clipboard::new());
                 let mut hotkeys = Hotkeys::new();
                 if let Err(e) = hotkeys.bind(&self.settings.hotkey) {
@@ -451,6 +455,8 @@ impl App {
         if spoken.trim().is_empty() {
             return Task::none();
         }
+        refresh_inline(p);
+        let before = p.doc.text().to_string();
         let mode = if commands_enabled { p.mode } else { Mode::Dictate };
         let command = commands_enabled.then(|| self.grammar.parse(&spoken, mode)).flatten();
         p.notice = None;
@@ -478,6 +484,7 @@ impl App {
         if let Outcome::SwitchMode(m) = outcome {
             p.mode = m;
         }
+        push_inline(p, &before);
         sync_editor(p);
         match outcome {
             Outcome::Insert => self.finish(Finish::Insert),
@@ -549,6 +556,12 @@ impl App {
         if self.popup.is_some() {
             return self.focus_popup();
         }
+        if let Some(field) = crate::a11y::focused() {
+            match crate::a11y::read(&field) {
+                Ok(snapshot) => return self.open_inline(field, snapshot),
+                Err(e) => log::info!("focused field cannot be read ({e:#}); using the dictation window"),
+            }
+        }
         let target = Target::capture();
         log::info!("dictation window opened");
         self.theme = crate::theme::current();
@@ -573,13 +586,52 @@ impl App {
             mode: Mode::Dictate,
             tidying: false,
             waiting: None,
+            inline: None,
         });
         open.then(move |id| {
             Task::batch([window::gain_focus(id), iced::widget::operation::focus(EDITOR)])
         })
     }
 
+    /// Dictates straight into a field of another application, showing only a small bar that
+    /// leaves the keyboard focus where it is.
+    fn open_inline(&mut self, field: crate::a11y::Target, snapshot: crate::a11y::Snapshot) -> Task<Message> {
+        log::info!("dictating into the focused field ({} characters)", snapshot.text.chars().count());
+        self.theme = crate::theme::current();
+        self.engine.send(EngineCommand::Standby(true));
+        let (id, open) = window::open(window::Settings {
+            size: Size::new(520.0, 46.0),
+            resizable: false,
+            decorations: false,
+            position: window::Position::Centered,
+            level: window::Level::AlwaysOnTop,
+            exit_on_close_request: false,
+            icon: window_icon(),
+            platform_specific: platform_specific(),
+            ..Default::default()
+        });
+        let mut doc = Document::default();
+        sync_doc(&mut doc, &snapshot);
+        self.popup = Some(Popup {
+            id,
+            content: text_editor::Content::new(),
+            doc,
+            preview: String::new(),
+            notice: None,
+            target: Target::default(),
+            mode: Mode::Dictate,
+            tidying: false,
+            waiting: None,
+            inline: Some((field, snapshot.text)),
+        });
+        // No focus request: the text field keeps the keyboard.
+        open.discard()
+    }
+
     fn focus_popup(&self) -> Task<Message> {
+        if self.popup.as_ref().is_some_and(|p| p.inline.is_some()) {
+            return Task::none();
+        }
         match &self.popup {
             Some(p) => Task::batch([window::gain_focus(p.id), iced::widget::operation::focus(EDITOR)]),
             None => Task::none(),
@@ -632,10 +684,13 @@ impl App {
     fn tidied(&mut self, start: usize, original: String, result: Result<String, String>) -> Task<Message> {
         let Some(p) = &mut self.popup else { return Task::none() };
         p.tidying = false;
+        refresh_inline(p);
+        let before = p.doc.text().to_string();
         match result {
             Ok(tidied) => {
                 if p.doc.apply_tidy(start, &original, &tidied) {
                     log::info!("tidied {:?} → {:?}", original.trim(), tidied);
+                    push_inline(p, &before);
                     sync_editor(p);
                 } else {
                     log::info!("tidy-up dropped: the text changed meanwhile");
@@ -657,11 +712,31 @@ impl App {
     }
 
     fn finish_now(&mut self, finish: Finish) -> Task<Message> {
-        let Some(popup) = self.popup.take() else { return Task::none() };
+        let Some(mut popup) = self.popup.take() else { return Task::none() };
         self.engine.send(EngineCommand::Standby(false));
         log::info!("finished with {finish:?}: {} characters", popup.doc.text().trim().chars().count());
         self.engine.send(EngineCommand::StopListening("finished"));
         let close = window::close(popup.id);
+        if let Some((field, original)) = popup.inline.take() {
+            // The text is already in place; cancelling puts the field back as it was.
+            match finish {
+                Finish::Cancel => {
+                    let current = crate::a11y::read(&field).map(|s| s.text).unwrap_or_default();
+                    let end = original.len();
+                    if let Err(e) = crate::a11y::write(&field, crate::a11y::diff(&current, &original, end..end)) {
+                        log::warn!("restoring the field: {e:#}");
+                    }
+                }
+                Finish::Copy => {
+                    let clipboard = self.clipboard.get_or_insert_with(Clipboard::new);
+                    if let Err(e) = clipboard.set(popup.doc.text()) {
+                        self.status = format!("{e:#}");
+                    }
+                }
+                Finish::Insert => {}
+            }
+            return close;
+        }
         let text = popup.doc.text().trim().to_string();
         if finish == Finish::Cancel || text.is_empty() {
             return close;
@@ -827,12 +902,52 @@ impl App {
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
         if let Some(p) = self.popup.as_ref().filter(|p| p.id == id) {
-            return self.popup_view(p);
+            return if p.inline.is_some() { self.bar_view(p) } else { self.popup_view(p) };
         }
         if let Some(w) = self.settings_window.as_ref().filter(|w| w.id == id) {
             return self.settings_view(w).map(Message::Settings);
         }
         space().into()
+    }
+
+    /// The small bar shown while dictating into another application's field.
+    fn bar_view<'a>(&'a self, p: &'a Popup) -> Element<'a, Message> {
+        let say = |command: commands::Command, fallback: &'static str| {
+            self.grammar.first_phrase(&command).map_or_else(|| tr(fallback).to_string(), crate::i18n::label)
+        };
+        let state_button = |label: String, on: bool, message: Message| {
+            button(text(label).size(13))
+                .padding([3, 10])
+                .on_press(message)
+                .style(if on { button::primary } else { secondary_button })
+        };
+        let listening = self.listening;
+        let activity = if p.tidying {
+            tr("Tidying up…").to_string()
+        } else {
+            p.notice.clone().unwrap_or_default()
+        };
+        container(
+            row![
+                state_button(say(commands::Command::StopListening, "Pause"), !listening, Message::Pause),
+                state_button(say(commands::Command::DictateMode, "Dictate"), listening && p.mode == Mode::Dictate, Message::SetMode(Mode::Dictate)),
+                state_button(say(commands::Command::EditMode, "Edit"), listening && p.mode == Mode::Edit, Message::SetMode(Mode::Edit)),
+                progress_bar(0.0..=1.0, if listening { self.level } else { 0.0 }).length(Length::Fixed(70.0)).girth(6),
+                text(activity).size(11).width(Length::Fill),
+                button(gear()).padding(3).on_press(Message::OpenSettings).style(button::text),
+                button(text(say(commands::Command::Insert, "Insert")).size(13))
+                    .padding([3, 10])
+                    .on_press(Message::Finish(Finish::Insert)),
+                button(text("✕").size(13))
+                    .padding([3, 8])
+                    .on_press(Message::Finish(Finish::Cancel))
+                    .style(secondary_button),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding(6)
+        .into()
     }
 
     fn popup_view<'a>(&'a self, p: &'a Popup) -> Element<'a, Message> {
@@ -1322,6 +1437,39 @@ fn platform_specific() -> window::settings::PlatformSpecific {
     };
     #[cfg(not(target_os = "linux"))]
     Default::default()
+}
+
+/// Loads a field's snapshot into the document, converting AT-SPI's character offsets.
+fn sync_doc(doc: &mut Document, snapshot: &crate::a11y::Snapshot) {
+    let at = |chars: usize| crate::a11y::byte_offset(&snapshot.text, chars);
+    let selection = match snapshot.selection {
+        Some((a, b)) => at(a)..at(b),
+        None => at(snapshot.caret)..at(snapshot.caret),
+    };
+    doc.sync_from(snapshot.text.clone(), selection);
+}
+
+/// Re-reads an inline field before an edit, so typing done there in between is respected.
+fn refresh_inline(p: &mut Popup) {
+    if let Some((field, _)) = &p.inline {
+        match crate::a11y::read(field) {
+            Ok(snapshot) => sync_doc(&mut p.doc, &snapshot),
+            Err(e) => log::warn!("reading the field: {e:#}"),
+        }
+    }
+}
+
+/// Writes what changed in the document back to an inline field.
+fn push_inline(p: &mut Popup, before: &str) {
+    let Some((field, _)) = &p.inline else { return };
+    if before == p.doc.text() && p.doc.selection().is_empty() {
+        return;
+    }
+    let edits = crate::a11y::diff(before, p.doc.text(), p.doc.selection());
+    if let Err(e) = crate::a11y::write(field, edits) {
+        log::warn!("writing to the field: {e:#}");
+        p.notice = Some(format!("{e:#}"));
+    }
 }
 
 /// Rebuilds the editor from the document after a voice edit.

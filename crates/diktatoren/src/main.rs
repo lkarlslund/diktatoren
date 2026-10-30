@@ -3,6 +3,11 @@
 // No console window on Windows release builds.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(target_os = "linux")]
+mod a11y;
+#[cfg(not(target_os = "linux"))]
+#[path = "a11y_stub.rs"]
+mod a11y;
 mod ai;
 mod app;
 mod audio;
