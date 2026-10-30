@@ -33,6 +33,11 @@ pub fn run(settings: Settings, initial: Option<Action>) -> iced::Result {
     iced::daemon(move || App::boot(settings.clone(), initial), App::update, App::view)
         .title(App::title)
         .theme(App::theme)
+        // Windows paint their own background, so the dictation bar can have round corners.
+        .style(|_, theme: &iced::Theme| iced::theme::Style {
+            background_color: iced::Color::TRANSPARENT,
+            text_color: theme.palette().text,
+        })
         .subscription(App::subscription)
         .run()
 }
@@ -195,6 +200,9 @@ impl App {
     }
 
     fn title(&self, id: window::Id) -> String {
+        if self.popup.as_ref().is_some_and(|p| p.id == id && p.inline.is_some()) {
+            return "Diktatoren bar".into();
+        }
         if self.settings_window.as_ref().is_some_and(|s| s.id == id) {
             tr("Diktatoren settings").into()
         } else {
@@ -628,10 +636,15 @@ impl App {
         self.theme = crate::theme::current();
         self.engine.send(EngineCommand::Standby(true));
         let (id, open) = window::open(window::Settings {
-            size: Size::new(520.0, 46.0),
+            size: Size::new(540.0, 52.0),
             resizable: false,
             decorations: false,
-            position: window::Position::Centered,
+            transparent: true,
+            // Bottom centre where the platform lets applications place windows; on KDE
+            // Wayland a KWin script does it.
+            position: window::Position::SpecificWith(|window, screen| {
+                iced::Point::new((screen.width - window.width) / 2.0, screen.height - window.height - 72.0)
+            }),
             level: window::Level::AlwaysOnTop,
             exit_on_close_request: false,
             icon: window_icon(),
@@ -653,6 +666,8 @@ impl App {
             waiting: None,
             inline: Some((field, snapshot.text)),
         });
+        #[cfg(target_os = "linux")]
+        crate::kwin::place_bar();
         // No focus request: the text field keeps the keyboard.
         open.discard()
     }
@@ -983,7 +998,7 @@ impl App {
         } else {
             p.notice.clone().unwrap_or_default()
         };
-        container(
+        let panel = container(
             row![
                 state_button(say(commands::Command::StopListening, "Pause"), !listening, Message::Pause),
                 state_button(say(commands::Command::DictateMode, "Dictate"), listening && p.mode == Mode::Dictate, Message::SetMode(Mode::Dictate)),
@@ -1002,8 +1017,21 @@ impl App {
             .spacing(6)
             .align_y(Alignment::Center),
         )
-        .padding(6)
-        .into()
+        .padding([6, 10])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|theme: &iced::Theme| {
+            let palette = theme.palette();
+            let edge = iced::Color { a: 0.35, ..palette.text };
+            container::Style {
+                background: Some(palette.background.into()),
+                border: iced::Border { color: edge, width: 1.0, radius: 12.0.into() },
+                text_color: Some(palette.text),
+                ..Default::default()
+            }
+        });
+        // The window itself is transparent, so the rounded corners show.
+        container(panel).padding(1).into()
     }
 
     fn popup_view<'a>(&'a self, p: &'a Popup) -> Element<'a, Message> {
@@ -1113,7 +1141,7 @@ impl App {
             button(text(enter_label)).on_press(Message::Finish(enter_finish)),
         ]
         .spacing(8);
-        container(body.push(buttons)).padding(12).into()
+        container(body.push(buttons)).padding(12).style(solid).width(Length::Fill).height(Length::Fill).into()
     }
 
     fn settings_view<'a>(&'a self, w: &'a SettingsWindow) -> Element<'a, SettingsMessage> {
@@ -1153,6 +1181,9 @@ impl App {
                 .spacing(10),
         )
         .padding(12)
+        .style(solid)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
     }
 
@@ -1408,6 +1439,11 @@ impl std::fmt::Display for HotkeyMode {
 
 fn bus_stream() -> impl futures::Stream<Item = BusEvent> {
     bus::take_receiver().unwrap_or_else(|| futures::channel::mpsc::unbounded().1)
+}
+
+/// A plain window background.
+fn solid(theme: &iced::Theme) -> container::Style {
+    container::Style { background: Some(theme.palette().background.into()), ..Default::default() }
 }
 
 /// A desktop-style button: the window background lifted slightly, with a thin border.

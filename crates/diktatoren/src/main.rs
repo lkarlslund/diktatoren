@@ -24,6 +24,8 @@ mod hotkey;
 mod i18n;
 mod icon;
 mod ipc;
+#[cfg(target_os = "linux")]
+mod kwin;
 mod output;
 #[cfg(target_os = "linux")]
 mod portal;
