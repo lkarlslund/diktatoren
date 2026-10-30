@@ -49,6 +49,7 @@ Models and testing:
   transcribe <wav>          transcribe a WAV file on the speech server
   listen [wav]              dictate in the terminal, from the microphone or a WAV file
   mic-test                  show the microphone level for a few seconds (records nothing)
+  feed <wav>                make the running instance dictate from a WAV file (testing)
 ";
 
 fn main() -> Result<()> {
@@ -81,6 +82,14 @@ fn main() -> Result<()> {
         }
         Some("listen") => listen(settings, args.get(1)),
         Some("mic-test") => mic_test(&settings),
+        Some("feed") => {
+            let wav = args.get(1).context("usage: diktatoren feed <file.wav>")?;
+            let path = std::fs::canonicalize(wav).with_context(|| format!("reading {wav}"))?;
+            if !ipc::send_to_running(&format!("feed {}", path.display())) {
+                bail!("Diktatoren is not running");
+            }
+            Ok(())
+        }
         Some("-h" | "--help" | "help") => {
             print!("{USAGE}");
             Ok(())

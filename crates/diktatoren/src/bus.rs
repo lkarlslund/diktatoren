@@ -26,6 +26,8 @@ pub enum BusEvent {
     HotkeyPressed,
     HotkeyReleased,
     Action(Action),
+    /// Dictate from this WAV file instead of the microphone, for testing.
+    Feed(std::path::PathBuf),
     DownloadProgress(String, Progress),
     DownloadFinished(String, Result<(), String>),
     /// Speech models offered by an audio.cpp server, or why they could not be listed.

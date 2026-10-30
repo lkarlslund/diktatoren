@@ -53,6 +53,8 @@ pub enum Command {
     Configure(Box<Settings>),
     /// Starts listening. `from_wake` enables the silence timeout.
     Listen { from_wake: bool },
+    /// Listens to a WAV file instead of the microphone until listening stops.
+    ListenFrom(PathBuf),
     /// Stops listening; speech in progress is still recognised.
     StopListening,
     Shutdown,
@@ -137,6 +139,8 @@ struct Engine {
     audio_rx: mpsc::Receiver<Vec<f32>>,
     listening: Option<Listening>,
     idle: Option<Idle>,
+    /// A WAV file standing in for the microphone during one listening period.
+    input_override: Option<String>,
     commands: mpsc::Sender<Command>,
     wake_pos: i64,
     wake_pending: Vec<f32>,
@@ -169,6 +173,7 @@ impl Engine {
             audio_rx,
             listening: None,
             idle: None,
+            input_override: None,
             commands,
             wake_pos: 0,
             wake_pending: Vec::new(),
@@ -219,6 +224,15 @@ impl Engine {
             }
             Command::Listen { from_wake } => {
                 if let Err(e) = self.start_listening(from_wake) {
+                    self.emit(Event::Error(format!("{e:#}")));
+                }
+            }
+            Command::ListenFrom(path) => {
+                log::info!("listening to {} instead of the microphone", path.display());
+                self.stop_listening();
+                self.input_override = Some(format!("file:{}", path.display()));
+                self.capture = None;
+                if let Err(e) = self.start_listening(false) {
                     self.emit(Event::Error(format!("{e:#}")));
                 }
             }
@@ -359,7 +373,10 @@ impl Engine {
     fn update_microphone(&mut self) {
         let wanted = self.listening.is_some() || self.wake_active();
         if wanted && self.capture.is_none() {
-            let device = self.settings().map(|s| s.input_device.clone()).unwrap_or_default();
+            let device = match &self.input_override {
+                Some(file) => file.clone(),
+                None => self.settings().map(|s| s.input_device.clone()).unwrap_or_default(),
+            };
             while self.audio_rx.try_recv().is_ok() {}
             match Capture::start(&device, self.audio_tx.clone()) {
                 Ok(c) => self.capture = Some(c),
@@ -422,6 +439,9 @@ impl Engine {
             let _ = l.vad.stream_finish();
         }
         self.emit(Event::Listening(false));
+        if self.input_override.take().is_some() {
+            self.capture = None;
+        }
         self.start_idle();
         self.update_microphone();
     }

@@ -68,9 +68,13 @@ pub fn serve() -> Result<()> {
     thread::Builder::new().name("ipc".into()).spawn(move || {
         for conn in listener.incoming().flatten() {
             let mut line = String::new();
-            if BufReader::new(conn).read_line(&mut line).is_ok()
-                && let Some(action) = parse(line.trim())
-            {
+            if BufReader::new(conn).read_line(&mut line).is_err() {
+                continue;
+            }
+            let line = line.trim();
+            if let Some(path) = line.strip_prefix("feed ") {
+                bus::send(BusEvent::Feed(path.into()));
+            } else if let Some(action) = parse(line) {
                 bus::send(BusEvent::Action(action));
             }
         }

@@ -302,6 +302,11 @@ impl App {
                 }
                 Task::none()
             }
+            BusEvent::Feed(path) => {
+                log::info!("feed {}", path.display());
+                self.engine.send(EngineCommand::ListenFrom(path));
+                if self.popup.is_none() { self.open_popup() } else { self.focus_popup() }
+            }
             BusEvent::Action(action) => {
                 log::info!("action {action:?}");
                 self.action(action)
