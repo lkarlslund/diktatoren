@@ -28,8 +28,6 @@ pub enum Command {
     Copy,
     Cancel,
     StopListening,
-    /// Start listening again after a pause.
-    Resume,
     EditMode,
     DictateMode,
     /// Starts item `n` of a numbered list on a new line.
@@ -122,9 +120,8 @@ pub fn specs() -> Vec<Spec> {
         fixed("copy", "Copy to the clipboard", true, Copy, "copy, copy it, copy that", "kopiér, kopier, kopiér det, kopier teksten"),
         fixed("cancel", "Cancel", true, Cancel, "cancel, cancel that, never mind", "annuller, annullér, afbryd, glem det"),
         fixed("pause", "Stop listening", true, StopListening, "pause, stop listening, microphone off", "pause, stop med at lytte, hold pause, mikrofon fra"),
-        fixed("resume", "Listen again (while paused)", true, Resume, "listen, resume, start listening, microphone on", "lyt, lyd, lyt igen, fortsæt, mikrofon til"),
-        fixed("edit_mode", "Switch to Edit mode", true, EditMode, "edit, edit mode, editing", "redigér, rediger, redigering"),
-        fixed("dictate_mode", "Switch to Dictate mode", true, DictateMode, "dictate, dictation, dictate mode", "diktér, dikter, diktat"),
+        fixed("edit_mode", "Edit mode (also leaves a pause)", true, EditMode, "edit, edit mode, editing", "redigér, rediger, redigering"),
+        fixed("dictate_mode", "Dictate mode (also leaves a pause)", true, DictateMode, "dictate, dictation, dictate mode", "diktér, dikter, diktat"),
         fixed("next_sentence", "Next sentence", true, NextSentence, "next sentence, new sentence", "næste sætning, ny sætning"),
         fixed("new_line", "New line", true, NewLine, "new line, line break, next line", "ny linje, linjeskift, næste linje"),
         fixed("new_paragraph", "New paragraph", true, NewParagraph, "new paragraph, next paragraph", "nyt afsnit, næste afsnit"),

@@ -57,7 +57,7 @@ enum Message {
     Bus(BusEvent),
     Edit(text_editor::Action),
     Finish(Finish),
-    ToggleListening,
+    Pause,
     SetMode(Mode),
     OpenSettings,
     WindowClosed(window::Id),
@@ -250,15 +250,14 @@ impl App {
                     p.mode = mode;
                     p.notice = None;
                 }
-                self.focus_popup()
-            }
-            Message::ToggleListening => {
-                if self.listening {
-                    self.engine.send(EngineCommand::StopListening("Pause button"));
-                } else {
+                if !self.listening {
                     self.engine.send(EngineCommand::Listen { from_wake: false });
                 }
-                Task::none()
+                self.focus_popup()
+            }
+            Message::Pause => {
+                self.engine.send(EngineCommand::StopListening("Pause button"));
+                self.focus_popup()
             }
             Message::CloseRequested(id) => {
                 if self.popup.as_ref().is_some_and(|p| p.id == id) {
@@ -488,29 +487,29 @@ impl App {
                 self.engine.send(EngineCommand::StopListening("voice command"));
                 Task::none()
             }
-            Outcome::Resume => {
-                self.engine.send(EngineCommand::Listen { from_wake: false });
-                Task::none()
-            }
             Outcome::Edited => self.start_tidy(),
             Outcome::NotFound | Outcome::SwitchMode(_) => Task::none(),
         }
     }
 
-    /// Speech heard while paused: only the resume command acts on it.
+    /// Speech heard while paused: only switching to Dictate or Edit acts on it, and resumes
+    /// listening in that mode.
     fn overheard(&mut self, heard: String) -> Task<Message> {
         if self.popup.is_none() || self.listening || !self.settings.voice_commands {
             return Task::none();
         }
         let command = self.grammar.parse(&heard, Mode::Dictate);
         log::info!("paused: {heard:?} → {command:?}");
-        match command {
-            Some(commands::Command::Resume) => {
-                self.engine.send(EngineCommand::Listen { from_wake: false });
-                Task::none()
-            }
-            _ => Task::none(),
+        let mode = match command {
+            Some(commands::Command::DictateMode) => Mode::Dictate,
+            Some(commands::Command::EditMode) => Mode::Edit,
+            _ => return Task::none(),
+        };
+        if let Some(p) = &mut self.popup {
+            p.mode = mode;
         }
+        self.engine.send(EngineCommand::Listen { from_wake: false });
+        Task::none()
     }
 
     fn action(&mut self, action: Action) -> Task<Message> {
@@ -860,26 +859,25 @@ impl App {
                 }
             });
 
-        let state = if self.listening {
-            "Listening".to_string()
-        } else {
-            match self.grammar.first_phrase(&commands::Command::Resume) {
-                Some(word) if self.settings.voice_commands => format!("Paused · say “{word}”"),
-                _ => "Paused".to_string(),
-            }
-        };
-        let mode_button = |label: &'static str, mode: Mode| {
+        // Pause | Dictate | Edit: one of them is always lit.
+        let state_button = |label: &'static str, on: bool, message: Message| {
             button(text(label).size(13))
                 .padding([3, 10])
-                .on_press(Message::SetMode(mode))
-                .style(if p.mode == mode { button::primary } else { secondary_button })
+                .on_press(message)
+                .style(if on { button::primary } else { secondary_button })
         };
+        let listening = self.listening;
+        let states = row![
+            state_button("Pause", !listening, Message::Pause),
+            state_button("Dictate", listening && p.mode == Mode::Dictate, Message::SetMode(Mode::Dictate)),
+            state_button("Edit", listening && p.mode == Mode::Edit, Message::SetMode(Mode::Edit)),
+        ]
+        .spacing(2);
         let header = row![
-            text(state).size(14),
-            progress_bar(0.0..=1.0, if self.listening { self.level } else { 0.0 })
-                .length(Length::Fixed(120.0))
+            states,
+            progress_bar(0.0..=1.0, if listening { self.level } else { 0.0 })
+                .length(Length::Fixed(110.0))
                 .girth(6),
-            row![mode_button("Dictate", Mode::Dictate), mode_button("Edit", Mode::Edit)].spacing(2),
             space::horizontal(),
             text(&self.status).size(12),
             button(gear()).padding(4).on_press(Message::OpenSettings).style(button::text),
@@ -896,6 +894,16 @@ impl App {
         }
         if let Some(n) = &p.notice {
             body = body.push(text(n).size(13));
+        } else if !listening && self.settings.voice_commands {
+            let say = |c: commands::Command| self.grammar.first_phrase(&c).unwrap_or("").to_string();
+            body = body.push(
+                text(format!(
+                    "Paused. Say “{}” or “{}” to go on.",
+                    say(commands::Command::DictateMode),
+                    say(commands::Command::EditMode)
+                ))
+                .size(12),
+            );
         } else if p.tidying {
             body = body.push(text("Tidying up…").size(12));
         }
@@ -908,9 +916,6 @@ impl App {
             FinishAction::Copy => (Finish::Copy, Finish::Insert),
         };
         let buttons = row![
-            button(if self.listening { "Pause" } else { "Listen" })
-                .on_press(Message::ToggleListening)
-                .style(secondary_button),
             space::horizontal(),
             button("Cancel (Esc)").on_press(Message::Finish(Finish::Cancel)).style(secondary_button),
             button(ctrl_label).on_press(Message::Finish(ctrl_finish)).style(secondary_button),

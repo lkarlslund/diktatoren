@@ -70,18 +70,21 @@ Your words appear at once; a moment later the sentence is replaced with the tidi
 answer that changes too many words is treated as a rewrite and ignored, "undo" brings back
 what was heard, and inserting waits for a tidy-up that is still running (up to 15 seconds).
 
-### Dictate and Edit mode
+### Pause, Dictate and Edit
 
-The dictation window has two modes, shown as **Dictate / Edit** buttons next to the level
-meter. Switch by clicking or by saying "edit" / "dictate" ("redigér" / "diktér" in Danish).
+The dictation window is always in one of three states, shown as **Pause | Dictate | Edit** at
+the top. Click one, or say it:
 
 * **Dictate**: what you say becomes text at the cursor, replacing any selection. A few control
   commands said on their own still act: insert, copy, cancel, pause, new line, new paragraph,
-  punctuation ("period", "comma" …), undo and "delete that".
+  next sentence, punctuation ("period", "comma" …), undo and "delete that".
 * **Edit**: what you say is an editing command, and nothing is typed by accident. Besides the
-  control commands: "replace X with Y", "delete X", "select X", "delete last word / sentence",
-  "select all", "clear all", "go to end / start", "redo". After "select X", words that are no
-  command replace the selection.
+  control commands: "replace X with Y", "delete X", "select X", "delete the last two
+  sentences", "select all", "clear all", "go to end / start", "redo". After "select X", words
+  that are no command replace the selection.
+* **Pause**: the microphone stays open but nothing is written; only "dictate" / "diktér" and
+  "edit" / "redigér" are heard, and they resume in that mode. "Pause" by voice or click gets
+  you here; the hotkey toggles between pause and the mode you were in.
 
 A command has to be said on its own, with a short pause before and after. Lone words match
 loosely, so "Inset" or "Annuler" from the recogniser still count.
