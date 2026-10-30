@@ -145,11 +145,10 @@ fn parse_body(body: &str, original: String) -> Option<Command> {
     for verb in [&["replace"][..], &["change"], &["erstat"], &["ret"], &["skift"], &["udskift"]] {
         if starts(verb) {
             for sep in ["with", "to", "med", "til", "ud med"] {
-                if let Some((from, to)) = split_on_word(&words[verb.len()..], sep) {
-                    if !from.is_empty() && !to.is_empty() {
+                if let Some((from, to)) = split_on_word(&words[verb.len()..], sep)
+                    && !from.is_empty() && !to.is_empty() {
                         return Some(Replace { from, to });
                     }
-                }
             }
         }
     }

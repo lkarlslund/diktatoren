@@ -34,3 +34,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --workspace --locked
+      - name: Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

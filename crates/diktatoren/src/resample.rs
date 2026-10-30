@@ -104,7 +104,7 @@ mod tests {
         }
         assert!((out.len() as i64 - 16_000).abs() < 40, "len {}", out.len());
         let level = rms(&out[200..out.len() - 200]);
-        assert!((level - 0.7071).abs() < 0.02, "rms {level}");
+        assert!((level - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.02, "rms {level}");
     }
 
     #[test]
@@ -123,6 +123,6 @@ mod tests {
         let mut out = Vec::new();
         r.process(&input, &mut out);
         assert!((out.len() as i64 - 16_000).abs() < 40);
-        assert!((rms(&out[200..out.len() - 200]) - 0.7071).abs() < 0.02);
+        assert!((rms(&out[200..out.len() - 200]) - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.02);
     }
 }

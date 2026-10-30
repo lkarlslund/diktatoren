@@ -537,11 +537,10 @@ impl Engine {
             let from = start.saturating_sub(PREROLL).max(idle.offset) - idle.offset;
             let to = end.min(end_of_audio) - idle.offset;
             let length = to.saturating_sub(from);
-            if length > SAMPLE_RATE as usize / 4 && length <= MAX_WAKE_UTTERANCE {
-                if let Some(r) = &self.recogniser {
+            if length > SAMPLE_RATE as usize / 4 && length <= MAX_WAKE_UTTERANCE
+                && let Some(r) = &self.recogniser {
                     r.submit(Job::Wake(idle.audio[from..to].to_vec(), phrase.clone()));
                 }
-            }
         }
         // Long speech is not a wake phrase; stop holding on to it.
         if idle.speech_start.is_some_and(|s| end_of_audio - s > MAX_WAKE_UTTERANCE) {

@@ -562,11 +562,10 @@ impl App {
                 }
             }
             M::Remove(id) => {
-                if let Some((_, package)) = catalog::find(&id) {
-                    if let Err(e) = download::remove(package, &self.settings.models_dir()) {
+                if let Some((_, package)) = catalog::find(&id)
+                    && let Err(e) = download::remove(package, &self.settings.models_dir()) {
                         self.status = format!("{e:#}");
                     }
-                }
             }
             M::Save => {
                 let hotkey_changed = d.hotkey != self.settings.hotkey;
@@ -761,7 +760,6 @@ impl App {
                     ]
                     .spacing(10),
                 )
-            .into()
         };
         let mut mics = vec![choice("", "System default")];
         mics.extend(w.microphones.iter().map(|m| choice(m, m)));
