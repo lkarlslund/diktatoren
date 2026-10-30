@@ -546,7 +546,7 @@ impl Engine {
         if idle.speech_start.is_some_and(|s| end_of_audio - s > MAX_WAKE_UTTERANCE) {
             idle.speech_start = None;
         }
-        let keep_from = idle.speech_start.map_or(end_of_audio, |s| s).saturating_sub(PREROLL);
+        let keep_from = idle.speech_start.unwrap_or(end_of_audio).saturating_sub(PREROLL);
         if keep_from > idle.offset {
             idle.audio.drain(..keep_from - idle.offset);
             idle.offset = keep_from;
