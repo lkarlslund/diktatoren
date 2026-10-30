@@ -448,7 +448,7 @@ impl App {
         }
     }
 
-    /// Speech heard while paused: only resuming and finishing act on it.
+    /// Speech heard while paused: only the resume command acts on it.
     fn overheard(&mut self, heard: String) -> Task<Message> {
         if self.popup.is_none() || self.listening || !self.settings.voice_commands {
             return Task::none();
@@ -460,9 +460,6 @@ impl App {
                 self.engine.send(EngineCommand::Listen { from_wake: false });
                 Task::none()
             }
-            Some(commands::Command::Insert) => self.finish(Finish::Insert),
-            Some(commands::Command::Copy) => self.finish(Finish::Copy),
-            Some(commands::Command::Cancel) => self.finish(Finish::Cancel),
             _ => Task::none(),
         }
     }
