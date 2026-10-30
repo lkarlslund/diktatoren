@@ -131,6 +131,20 @@ impl Document {
                 self.undo.push(self.snapshot());
                 self.restore(next);
             }
+            NextSentence => {
+                let at = self.selection.start;
+                let head = self.text[..at].trim_end();
+                if head.is_empty() {
+                    return Outcome::NotFound;
+                }
+                let end = head.len();
+                let mark = if head.ends_with(['.', '!', '?', ':']) { "" } else { "." };
+                self.checkpoint();
+                self.text.replace_range(end..self.selection.end, mark);
+                let cursor = end + mark.len();
+                self.selection = cursor..cursor;
+                self.last_insert = None;
+            }
             NewLine => self.insert_raw("\n"),
             NewParagraph => self.insert_raw("\n\n"),
             Punctuation(mark) => {
@@ -373,6 +387,16 @@ mod tests {
     fn new_line_and_punctuation() {
         let d = doc(&["Kære Ole", "komma", "ny linje", "tak for sidst."]);
         assert_eq!(d.text(), "Kære Ole,\nTak for sidst.");
+    }
+
+    #[test]
+    fn next_sentence() {
+        let d = doc(&["Vi mødes på mandag", "næste sætning", "husk kaffe"]);
+        assert_eq!(d.text(), "Vi mødes på mandag. Husk kaffe");
+        let d = doc(&["Is it done?", "next sentence", "yes"]);
+        assert_eq!(d.text(), "Is it done? Yes", "no second mark after a question");
+        let d = doc(&["Vi mødes", "næste sætning", "næste sætning", "ja"]);
+        assert_eq!(d.text(), "Vi mødes. Ja", "repeating it does nothing more");
     }
 
     #[test]

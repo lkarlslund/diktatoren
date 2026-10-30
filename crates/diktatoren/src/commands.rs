@@ -32,6 +32,8 @@ pub enum Command {
     Resume,
     EditMode,
     DictateMode,
+    /// Ends the sentence with a full stop if it has no end mark; the next words start a new one.
+    NextSentence,
     NewLine,
     NewParagraph,
     Undo,
@@ -119,6 +121,7 @@ pub fn specs() -> Vec<Spec> {
         fixed("resume", "Listen again (while paused)", true, Resume, "listen, resume, start listening, microphone on", "lyt, lyd, lyt igen, fortsæt, mikrofon til"),
         fixed("edit_mode", "Switch to Edit mode", true, EditMode, "edit, edit mode, editing", "redigér, rediger, redigering"),
         fixed("dictate_mode", "Switch to Dictate mode", true, DictateMode, "dictate, dictation, dictate mode", "diktér, dikter, diktat"),
+        fixed("next_sentence", "Next sentence", true, NextSentence, "next sentence, new sentence", "næste sætning, ny sætning"),
         fixed("new_line", "New line", true, NewLine, "new line, line break, next line", "ny linje, linjeskift, næste linje"),
         fixed("new_paragraph", "New paragraph", true, NewParagraph, "new paragraph, next paragraph", "nyt afsnit, næste afsnit"),
         fixed("period", "Full stop", true, Punctuation("."), "period, full stop", "punktum"),
@@ -334,6 +337,8 @@ mod tests {
         assert_eq!(da("Punktum.", Dictate), Some(Punctuation(".")));
         assert_eq!(en("Scratch that.", Dictate), Some(DeleteThat));
         assert_eq!(da("Redigér.", Dictate), Some(EditMode));
+        assert_eq!(da("Næste sætning.", Dictate), Some(NextSentence));
+        assert_eq!(en("Next sentence", Dictate), Some(NextSentence));
     }
 
     #[test]
