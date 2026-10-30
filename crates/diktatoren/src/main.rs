@@ -48,6 +48,7 @@ Models and testing:
   download <package-id>     download a model
   transcribe <wav> [id]     transcribe a WAV file
   listen [wav]              dictate in the terminal, from the microphone or a WAV file
+  mic-test                  show the microphone level for a few seconds (records nothing)
 ";
 
 fn main() -> Result<()> {
@@ -77,6 +78,7 @@ fn main() -> Result<()> {
             transcribe(&settings, Path::new(wav), &package)
         }
         Some("listen") => listen(settings, args.get(1)),
+        Some("mic-test") => mic_test(&settings),
         Some("-h" | "--help" | "help") => {
             print!("{USAGE}");
             Ok(())
@@ -193,6 +195,28 @@ fn listen(mut settings: Settings, input: Option<&String>) -> Result<()> {
             engine::Event::Level(_) => {}
             other => eprintln!("[{other:?}]"),
         }
+    }
+    Ok(())
+}
+
+/// Opens the configured microphone briefly and prints its level, keeping no audio.
+fn mic_test(settings: &Settings) -> Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _capture = audio::Capture::start(&settings.input_device, tx)?;
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let (mut samples, mut peak) = (0usize, 0f32);
+    while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+        let Ok(block) = rx.recv_timeout(left) else { break };
+        samples += block.len();
+        peak = block.iter().fold(peak, |p, s| p.max(s.abs()));
+    }
+    println!(
+        "received {:.1} s of audio, peak level {:.3}",
+        samples as f32 / audio::SAMPLE_RATE as f32,
+        peak
+    );
+    if samples == 0 {
+        bail!("the microphone delivered no audio");
     }
     Ok(())
 }

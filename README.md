@@ -108,6 +108,7 @@ diktatoren models           list downloadable models (* = installed)
 diktatoren download <id>    download a model
 diktatoren transcribe <wav> [id]
 diktatoren listen [wav]     dictate in the terminal, from the microphone or a WAV file
+diktatoren mic-test         show the microphone level for a few seconds (records nothing)
 ```
 
 Settings live in `config.toml` in the platform config directory
