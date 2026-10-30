@@ -28,6 +28,8 @@ use crate::tray::Tray;
 use crate::wake;
 
 const EDITOR: &str = "dictation";
+/// The bar's window title; KWin finds the bar by it.
+const BAR_TITLE: &str = "Diktatoren bar";
 
 pub fn run(settings: Settings, initial: Option<Action>) -> iced::Result {
     iced::daemon(move || App::boot(settings.clone(), initial), App::update, App::view)
@@ -202,7 +204,7 @@ impl App {
 
     fn title(&self, id: window::Id) -> String {
         if self.popup.as_ref().is_some_and(|p| p.id == id && p.inline.is_some()) {
-            return "Diktatoren bar".into();
+            return BAR_TITLE.into();
         }
         if self.settings_window.as_ref().is_some_and(|s| s.id == id) {
             tr("Diktatoren settings").into()
@@ -294,6 +296,10 @@ impl App {
             }
             Message::WindowClosed(id) => {
                 if self.popup.as_ref().is_some_and(|p| p.id == id) {
+                    #[cfg(target_os = "linux")]
+                    if self.popup.as_ref().is_some_and(|p| p.inline.is_some()) {
+                        crate::kwin::release_bar();
+                    }
                     self.popup = None;
                     self.engine.send(EngineCommand::Standby(false));
                     self.engine.send(EngineCommand::StopListening("window closed"));
@@ -650,6 +656,8 @@ impl App {
     fn open_inline(&mut self, field: crate::a11y::Target, snapshot: crate::a11y::Snapshot) -> Task<Message> {
         log::info!("dictating into the focused field ({} characters)", snapshot.text.chars().count());
         self.theme = crate::theme::current();
+        #[cfg(target_os = "linux")]
+        crate::kwin::prepare_bar();
         self.engine.send(EngineCommand::Standby(true));
         let (id, open) = window::open(window::Settings {
             size: Size::new(640.0, 52.0),
@@ -682,8 +690,6 @@ impl App {
             waiting: None,
             inline: Some(field),
         });
-        #[cfg(target_os = "linux")]
-        crate::kwin::place_bar();
         // No focus request: the text field keeps the keyboard.
         open.discard()
     }
@@ -803,6 +809,8 @@ impl App {
         self.engine.send(EngineCommand::StopListening("finished"));
         let close = window::close(popup.id);
         if popup.inline.take().is_some() {
+            #[cfg(target_os = "linux")]
+            crate::kwin::release_bar();
             // The text is already in place: closing leaves it as it is.
             match finish {
                 Finish::Cancel | Finish::Insert => {}
