@@ -57,6 +57,7 @@ enum Message {
     Finish(Finish),
     ToggleListening,
     SetMode(Mode),
+    OpenSettings,
     WindowClosed(window::Id),
     CloseRequested(window::Id),
     Deliver(String, Target),
@@ -216,6 +217,14 @@ impl App {
                 Task::none()
             }
             Message::Finish(finish) => self.finish(finish),
+            Message::OpenSettings => {
+                // Let the settings window come in front of the dictation window.
+                let lower = match &self.popup {
+                    Some(p) => window::set_level(p.id, window::Level::Normal),
+                    None => Task::none(),
+                };
+                Task::batch([lower, self.open_settings(Tab::General)])
+            }
             Message::SetMode(mode) => {
                 if let Some(p) = &mut self.popup {
                     p.mode = mode;
@@ -244,6 +253,12 @@ impl App {
                 }
                 if self.settings_window.as_ref().is_some_and(|s| s.id == id) {
                     self.settings_window = None;
+                    if let Some(p) = &self.popup {
+                        return Task::batch([
+                            window::set_level(p.id, window::Level::AlwaysOnTop),
+                            self.focus_popup(),
+                        ]);
+                    }
                 }
                 Task::none()
             }
@@ -685,6 +700,7 @@ impl App {
             row![mode_button("Dictate", Mode::Dictate), mode_button("Edit", Mode::Edit)].spacing(2),
             space::horizontal(),
             text(&self.status).size(12),
+            button(gear()).padding(4).on_press(Message::OpenSettings).style(button::text),
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -976,6 +992,16 @@ impl std::fmt::Display for HotkeyMode {
 
 fn bus_stream() -> impl futures::Stream<Item = BusEvent> {
     bus::take_receiver().unwrap_or_else(|| futures::channel::mpsc::unbounded().1)
+}
+
+/// A settings cog, drawn in the theme's text colour.
+fn gear<'a>() -> Element<'a, Message> {
+    const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="black" fill-rule="evenodd" d="M10.3 2h3.4l.5 2.6c.6.2 1.2.5 1.7.9l2.5-.9 1.7 2.9-2 1.8c.1.6.1 1.2 0 1.8l2 1.8-1.7 2.9-2.5-.9c-.5.4-1.1.7-1.7.9l-.5 2.6h-3.4l-.5-2.6c-.6-.2-1.2-.5-1.7-.9l-2.5.9-1.7-2.9 2-1.8a6 6 0 0 1 0-1.8l-2-1.8 1.7-2.9 2.5.9c.5-.4 1.1-.7 1.7-.9zM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" transform="translate(0 1)"/></svg>"#;
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(SVG.as_bytes()))
+        .width(18)
+        .height(18)
+        .style(|theme: &iced::Theme, _| iced::widget::svg::Style { color: Some(theme.palette().text) })
+        .into()
 }
 
 fn window_icon() -> Option<window::Icon> {

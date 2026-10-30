@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 audiocpp = { path = "../audiocpp" }
-iced = { version = "0.14", features = ["tokio"] }
+iced = { version = "0.14", features = ["tokio", "svg"] }
 cpal = { version = "0.18", features = ["pulseaudio"] }
 arboard = { version = "3", features = ["wayland-data-control"] }
 enigo = "0.6"
