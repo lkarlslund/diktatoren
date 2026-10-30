@@ -172,10 +172,14 @@ impl Document {
                 _ => false,
             }).map(|(i, _)| i)
         };
+        // Reach back one more sentence to fix joins, but never across a line break: what
+        // follows "new paragraph" is tidied on its own, so the break cannot be merged away.
+        let line_start = self.text[..untidy_start].rfind('\n').map_or(0, |i| i + 1);
         let start = match boundary(untidy_start) {
             Some(previous) => boundary(previous).map_or(0, |i| i + 1),
             None => 0,
         }
+        .max(line_start)
         .max(floor(untidy_start.saturating_sub(300)));
         let from = floor(start.saturating_sub(300));
         Some((start, self.text[start..end].to_string(), self.text[from..start].to_string()))
@@ -612,6 +616,20 @@ mod tests {
         assert_eq!(text, "Vi følger lidt op. På de ting vi har");
         assert!(d.apply_tidy(start, &text, "Vi følger lidt op på de ting, vi har."));
         assert_eq!(d.text(), "Vi følger lidt op på de ting, vi har.");
+    }
+
+    #[test]
+    fn tidy_does_not_reach_across_a_paragraph_break() {
+        let mut d = doc(&["Det forstår computeren."]);
+        let (start, text, _) = d.tidy_job().unwrap();
+        assert!(d.apply_tidy(start, &text, "Det forstår computeren."));
+        d.apply(&Command::NewParagraph);
+        d.dictate("for det er smart");
+        let (start, text, context) = d.tidy_job().unwrap();
+        assert_eq!(text, "For det er smart");
+        assert!(context.ends_with("\n\n"));
+        assert!(d.apply_tidy(start, &text, "For det er smart."));
+        assert_eq!(d.text(), "Det forstår computeren.\n\nFor det er smart.");
     }
 
     #[test]

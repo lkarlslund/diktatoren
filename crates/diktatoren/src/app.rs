@@ -474,6 +474,7 @@ impl App {
         let mode = if commands_enabled { p.mode } else { Mode::Dictate };
         let command = commands_enabled.then(|| self.grammar.parse(&spoken, mode)).flatten();
         p.notice = None;
+        let mut dictated = false;
         let outcome = match command {
             Some(c) => {
                 let outcome = p.doc.apply(&c);
@@ -510,6 +511,7 @@ impl App {
             None => {
                 p.doc.dictate(&spoken);
                 log::info!("{mode:?} mode: {spoken:?} → dictated");
+                dictated = true;
                 Outcome::Edited
             }
         };
@@ -529,7 +531,9 @@ impl App {
                 self.engine.send(EngineCommand::StopListening("voice command"));
                 Task::none()
             }
-            Outcome::Edited => self.start_tidy(),
+            // Only dictated text is tidied; commands and mode switches never start a clean-up.
+            Outcome::Edited if dictated => self.start_tidy(),
+            Outcome::Edited => Task::none(),
             Outcome::NotFound | Outcome::SwitchMode(_) => Task::none(),
         }
     }

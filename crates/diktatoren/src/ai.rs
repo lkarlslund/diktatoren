@@ -211,6 +211,11 @@ fn check(mode: AiMode, original: &str, answer: &str) -> Result<()> {
     if changed > allowed {
         bail!("the model changed {changed} of {} words", before.len());
     }
+    // Dropping words loses what was said; only an exact repeat ("meget meget") may go.
+    let repeats = before.windows(2).filter(|w| w[0] == w[1]).count();
+    if after.len() + repeats < before.len() {
+        bail!("the model dropped {} words", before.len() - after.len());
+    }
     // Numbers the recogniser heard as digits must survive; list numbers and amounts matter.
     let digits = |words: &[String]| -> Vec<String> {
         words.iter().filter(|w| w.chars().all(|c| c.is_ascii_digit())).cloned().collect()
@@ -243,6 +248,15 @@ mod tests {
     #[test]
     fn keeps_line_breaks() {
         assert_eq!(clean_answer("Kære Ole, \n\n Tak for sidst."), "Kære Ole,\n\nTak for sidst.");
+    }
+
+    #[test]
+    fn dropping_words_is_refused() {
+        let raw = "bare ved at sige det forstår computeren hvad man siger for";
+        assert!(check(AiMode::Correct, raw, "Bare ved at sige det, forstår computeren, hvad man siger.").is_err());
+        assert!(check(AiMode::Correct, "det er meget meget godt", "Det er meget godt.").is_ok());
+        let fix = "vi mødes på mandag klokken ti husket tager et kaffe med";
+        assert!(check(AiMode::Correct, fix, "Vi mødes på mandag klokken ti. Husk at tage et kaffe med.").is_ok());
     }
 
     #[test]
