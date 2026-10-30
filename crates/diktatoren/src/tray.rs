@@ -1,6 +1,7 @@
 //! The tray icon and its menu.
 
 use crate::bus::{self, Action, BusEvent};
+use crate::i18n::tr;
 use crate::icon::{self, State};
 
 const TOOLTIP: &str = "Diktatoren";
@@ -48,10 +49,10 @@ mod imp {
                 .into()
             };
             vec![
-                item("Dictate", Action::Toggle),
-                item("Settings…", Action::Settings),
+                item(tr("Dictate"), Action::Toggle),
+                item(tr("Settings…"), Action::Settings),
                 ksni::MenuItem::Separator,
-                item("Quit", Action::Quit),
+                item(tr("Quit"), Action::Quit),
             ]
         }
     }
@@ -74,6 +75,13 @@ mod imp {
                 h.update(|item| item.state = state);
             }
         }
+
+        /// Rebuilds the menu in the current interface language.
+        pub fn relabel(&self) {
+            if let Some(h) = &self.0 {
+                h.update(|_| {});
+            }
+        }
     }
 }
 
@@ -83,7 +91,7 @@ mod imp {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-    pub struct Tray(Option<TrayIcon>);
+    pub struct Tray(Option<TrayIcon>, [MenuItem; 3]);
 
     fn tray_icon(state: State) -> Option<tray_icon::Icon> {
         tray_icon::Icon::from_rgba(icon::rgba(32, state), 32, 32).ok()
@@ -92,9 +100,9 @@ mod imp {
     impl Tray {
         /// Must run on the main thread with the event loop running.
         pub fn new() -> Self {
-            let dictate = MenuItem::new("Dictate", true, None);
-            let settings = MenuItem::new("Settings…", true, None);
-            let quit = MenuItem::new("Quit", true, None);
+            let dictate = MenuItem::new(tr("Dictate"), true, None);
+            let settings = MenuItem::new(tr("Settings…"), true, None);
+            let quit = MenuItem::new(tr("Quit"), true, None);
             let menu = Menu::new();
             let _ = menu.append_items(&[&dictate, &settings, &PredefinedMenuItem::separator(), &quit]);
             let ids = [
@@ -124,11 +132,12 @@ mod imp {
             if let Some(icon) = tray_icon(State::Idle) {
                 builder = builder.with_icon(icon);
             }
+            let items = [dictate, settings, quit];
             match builder.build() {
-                Ok(t) => Tray(Some(t)),
+                Ok(t) => Tray(Some(t), items),
                 Err(e) => {
                     log::warn!("no system tray: {e}");
-                    Tray(None)
+                    Tray(None, items)
                 }
             }
         }
@@ -136,6 +145,13 @@ mod imp {
         pub fn set_state(&self, state: State) {
             if let Some(t) = &self.0 {
                 let _ = t.set_icon(tray_icon(state));
+            }
+        }
+
+        /// Relabels the menu in the current interface language.
+        pub fn relabel(&self) {
+            for (item, label) in self.1.iter().zip(["Dictate", "Settings…", "Quit"]) {
+                item.set_text(tr(label));
             }
         }
     }

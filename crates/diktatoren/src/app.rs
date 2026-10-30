@@ -21,6 +21,7 @@ use crate::document::{Document, Outcome};
 use crate::download::{self, Progress};
 use crate::engine::{self, Command as EngineCommand};
 use crate::hotkey::{self, Hotkeys};
+use crate::i18n::{tr, trf};
 use crate::icon::{self, State as IconState};
 use crate::output::{self, Clipboard, Target};
 use crate::tray::Tray;
@@ -174,7 +175,7 @@ impl App {
             settings_window: None,
             available,
             downloads: HashMap::new(),
-            status: "Starting…".into(),
+            status: tr("Starting…").into(),
             grammar,
             theme: crate::theme::current(),
             listening: false,
@@ -190,7 +191,7 @@ impl App {
 
     fn title(&self, id: window::Id) -> String {
         if self.settings_window.as_ref().is_some_and(|s| s.id == id) {
-            "Diktatoren settings".into()
+            tr("Diktatoren settings").into()
         } else {
             "Diktatoren".into()
         }
@@ -288,9 +289,7 @@ impl App {
                 std::thread::spawn(move || {
                     if let Err(e) = output::deliver(&text, &target, &settings) {
                         log::warn!("inserting text: {e:#}");
-                        bus::send(BusEvent::Notice(format!(
-                            "Could not insert the text ({e}). It is on the clipboard."
-                        )));
+                        bus::send(BusEvent::Notice(trf("Could not insert the text ({}). It is on the clipboard.", &[&e.to_string()])));
                     }
                 });
                 Task::none()
@@ -350,7 +349,7 @@ impl App {
                     Ok(()) => {
                         self.engine.send(EngineCommand::Configure(Box::new(self.settings.clone())));
                     }
-                    Err(e) => self.status = format!("Download failed: {e}"),
+                    Err(e) => self.status = trf("Download failed: {}", &[&e]),
                 }
                 Task::none()
             }
@@ -431,7 +430,7 @@ impl App {
                     return self.finish(Finish::Cancel);
                 }
             }
-            engine::Event::Ready { asr } => self.status = format!("Ready · {asr}"),
+            engine::Event::Ready { asr } => self.status = trf("Ready · {}", &[&asr]),
             engine::Event::Status(s) => self.status = s,
             engine::Event::Error(e) => {
                 log::warn!("{e}");
@@ -446,6 +445,7 @@ impl App {
 
     fn utterance(&mut self, spoken: String) -> Task<Message> {
         let commands_enabled = self.settings.voice_commands;
+        let dictate = self.grammar.first_phrase(&commands::Command::DictateMode).unwrap_or("dictate").to_string();
         let Some(p) = &mut self.popup else { return Task::none() };
         p.preview.clear();
         if spoken.trim().is_empty() {
@@ -463,7 +463,7 @@ impl App {
             // While editing, speech that is no command replaces the selection, if any.
             None if mode == Mode::Edit && p.doc.selection().is_empty() => {
                 log::info!("Edit mode: {spoken:?} → no command, ignored");
-                p.notice = Some(format!("“{spoken}” is not an edit command. Say “dictate” or “diktér” to write."));
+                p.notice = Some(trf("“{}” is not an edit command. Say “{}” to write.", &[&spoken, &dictate]));
                 Outcome::Edited
             }
             None => {
@@ -473,7 +473,7 @@ impl App {
             }
         };
         if outcome == Outcome::NotFound {
-            p.notice = Some(format!("Nothing to change for “{spoken}”"));
+            p.notice = Some(trf("Nothing to change for “{}”", &[&spoken]));
         }
         if let Outcome::SwitchMode(m) = outcome {
             p.mode = m;
@@ -596,7 +596,7 @@ impl App {
         {
             if p.waiting.is_none() {
                 p.waiting = Some(finish);
-                p.notice = Some("Tidying up the text…".into());
+                p.notice = Some(tr("Tidying up the text…").into());
                 self.engine.send(EngineCommand::StopListening("finishing"));
                 let start = self.start_tidy();
                 let timeout = Task::perform(tokio::time::sleep(Duration::from_secs(15)), |_| Message::TidyTimeout);
@@ -783,6 +783,10 @@ impl App {
                 let hotkey_changed = d.hotkey != self.settings.hotkey;
                 self.settings = d.clone();
                 self.grammar = self.settings.grammar();
+                crate::i18n::set_language(self.settings.command_language);
+                if let Some(t) = &self.tray {
+                    t.relabel();
+                }
                 w.saved_at = Some(Instant::now());
                 if let Err(e) = self.settings.save() {
                     self.status = format!("Saving settings: {e:#}");
@@ -835,7 +839,7 @@ impl App {
         let enter = self.settings.enter_action;
         let editor = text_editor(&p.content)
             .id(EDITOR)
-            .placeholder("Speak, or type…")
+            .placeholder(tr("Speak, or type…"))
             .on_action(Message::Edit)
             .height(Length::Fill)
             .size(17)
@@ -860,7 +864,11 @@ impl App {
             });
 
         // Pause | Dictate | Edit: one of them is always lit.
-        let state_button = |label: &'static str, on: bool, message: Message| {
+        // Labels are the first phrase of each command, so they read like what can be said.
+        let say = |command: commands::Command, fallback: &'static str| {
+            self.grammar.first_phrase(&command).map_or_else(|| tr(fallback).to_string(), crate::i18n::label)
+        };
+        let state_button = |label: String, on: bool, message: Message| {
             button(text(label).size(13))
                 .padding([3, 10])
                 .on_press(message)
@@ -868,9 +876,17 @@ impl App {
         };
         let listening = self.listening;
         let states = row![
-            state_button("Pause", !listening, Message::Pause),
-            state_button("Dictate", listening && p.mode == Mode::Dictate, Message::SetMode(Mode::Dictate)),
-            state_button("Edit", listening && p.mode == Mode::Edit, Message::SetMode(Mode::Edit)),
+            state_button(say(commands::Command::StopListening, "Pause"), !listening, Message::Pause),
+            state_button(
+                say(commands::Command::DictateMode, "Dictate"),
+                listening && p.mode == Mode::Dictate,
+                Message::SetMode(Mode::Dictate),
+            ),
+            state_button(
+                say(commands::Command::EditMode, "Edit"),
+                listening && p.mode == Mode::Edit,
+                Message::SetMode(Mode::Edit),
+            ),
         ]
         .spacing(2);
         let header = row![
@@ -897,29 +913,31 @@ impl App {
         } else if !listening && self.settings.voice_commands {
             let say = |c: commands::Command| self.grammar.first_phrase(&c).unwrap_or("").to_string();
             body = body.push(
-                text(format!(
+                text(trf(
                     "Paused. Say “{}” or “{}” to go on.",
-                    say(commands::Command::DictateMode),
-                    say(commands::Command::EditMode)
+                    &[&say(commands::Command::DictateMode), &say(commands::Command::EditMode)],
                 ))
                 .size(12),
             );
         } else if p.tidying {
-            body = body.push(text("Tidying up…").size(12));
+            body = body.push(text(tr("Tidying up…")).size(12));
         }
+        let insert = say(commands::Command::Insert, "Insert");
+        let copy = say(commands::Command::Copy, "Copy");
         let (enter_label, ctrl_label) = match enter {
-            FinishAction::Insert => ("Insert (Enter)", "Copy (Ctrl+Enter)"),
-            FinishAction::Copy => ("Copy (Enter)", "Insert (Ctrl+Enter)"),
+            FinishAction::Insert => (format!("{insert} (Enter)"), format!("{copy} (Ctrl+Enter)")),
+            FinishAction::Copy => (format!("{copy} (Enter)"), format!("{insert} (Ctrl+Enter)")),
         };
+        let cancel_label = format!("{} (Esc)", say(commands::Command::Cancel, "Cancel"));
         let (enter_finish, ctrl_finish) = match enter {
             FinishAction::Insert => (Finish::Insert, Finish::Copy),
             FinishAction::Copy => (Finish::Copy, Finish::Insert),
         };
         let buttons = row![
             space::horizontal(),
-            button("Cancel (Esc)").on_press(Message::Finish(Finish::Cancel)).style(secondary_button),
-            button(ctrl_label).on_press(Message::Finish(ctrl_finish)).style(secondary_button),
-            button(enter_label).on_press(Message::Finish(enter_finish)),
+            button(text(cancel_label)).on_press(Message::Finish(Finish::Cancel)).style(secondary_button),
+            button(text(ctrl_label)).on_press(Message::Finish(ctrl_finish)).style(secondary_button),
+            button(text(enter_label)).on_press(Message::Finish(enter_finish)),
         ]
         .spacing(8);
         container(body.push(buttons)).padding(12).into()
@@ -933,10 +951,10 @@ impl App {
                 .style(if w.tab == tab { button::primary } else { button::text })
         };
         let tabs = row![
-            tab_button("General", Tab::General),
-            tab_button("Speech", Tab::Speech),
-            tab_button("Output", Tab::Output),
-            tab_button("Voice commands", Tab::Commands),
+            tab_button(tr("General"), Tab::General),
+            tab_button(tr("Speech"), Tab::Speech),
+            tab_button(tr("Output"), Tab::Output),
+            tab_button(tr("Voice commands"), Tab::Commands),
         ]
         .spacing(4);
 
@@ -951,9 +969,9 @@ impl App {
         let footer = row![
             text(&self.status).size(12),
             space::horizontal(),
-            text(if saved { "Saved" } else { "" }).size(13),
-            button("Close").on_press(M::Close).style(secondary_button),
-            button("Save").on_press_maybe(dirty.then_some(M::Save)),
+            text(if saved { tr("Saved") } else { "" }).size(13),
+            button(tr("Close")).on_press(M::Close).style(secondary_button),
+            button(tr("Save")).on_press_maybe(dirty.then_some(M::Save)),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -970,11 +988,11 @@ impl App {
         let d = &w.draft;
         let modes = [HotkeyMode::Toggle, HotkeyMode::PushToTalk];
         let hotkey_hint = if hotkey::is_wayland() {
-            "On Wayland the desktop owns global shortcuts: it asks to confirm this one the first time, and you change it later in its shortcut settings. You can also bind the command `diktatoren toggle`."
+            tr("On Wayland the desktop owns global shortcuts: it asks to confirm this one the first time, and you change it later in its shortcut settings. You can also bind the command `diktatoren toggle`.")
         } else {
-            "For example Ctrl+Alt+Space, Super+D or F9."
+            tr("For example Ctrl+Alt+Space, Super+D or F9.")
         };
-        let mut wake_packages = vec![choice(wake::PHRASE, "Spoken phrase (your own words)")];
+        let mut wake_packages = vec![choice(wake::PHRASE, tr("Spoken phrase (your own words)"))];
         wake_packages.extend(self.wake_choices());
         let wake_selected = wake_packages.iter().find(|c| c.id == d.wake_word_package).cloned();
         let phrase_mode = d.wake_word_package == wake::PHRASE;
@@ -982,62 +1000,62 @@ impl App {
             space().into()
         } else {
             labeled(
-                    "Sensitivity",
+                    tr("Sensitivity"),
                     row![
                         slider(0.0_f32..=0.99_f32, d.wake_word_threshold, M::WakeThreshold).step(0.01_f32).width(200),
                         text(if d.wake_word_threshold == 0.0 {
-                            "model default".to_string()
+                            tr("model default").to_string()
                         } else {
-                            format!("threshold {:.2}", d.wake_word_threshold)
+                            trf("threshold {}", &[&format!("{:.2}", d.wake_word_threshold)])
                         })
                         .size(13)
                     ]
                     .spacing(10),
                 )
         };
-        let mut mics = vec![choice("", "System default")];
+        let mut mics = vec![choice("", tr("System default"))];
         mics.extend(w.microphones.iter().map(|m| choice(m, m)));
         let mic_selected = mics.iter().find(|c| c.id == d.input_device).cloned();
 
         column![
-            section("Activation"),
-            labeled("Hotkey", text_input("Ctrl+Alt+Space", &d.hotkey).on_input(M::Hotkey).width(240)),
+            section(tr("Activation")),
+            labeled(tr("Hotkey"), text_input("Ctrl+Alt+Space", &d.hotkey).on_input(M::Hotkey).width(240)),
             hint(hotkey_hint),
             labeled(
-                "Hotkey works as",
+                tr("Hotkey works as"),
                 pick_list(modes, Some(d.hotkey_mode), M::HotkeyMode).width(240),
             ),
-            hint("Toggle: press to start, press again to stop. Push to talk: listens while held."),
-            checkbox(d.wake_word_enabled).label("Start dictation with a wake word").on_toggle(M::WakeEnabled),
-            labeled("Wake word", pick_list(wake_packages, wake_selected, M::WakePackage).width(320)),
+            hint(tr("Toggle: press to start, press again to stop. Push to talk: listens while held.")),
+            checkbox(d.wake_word_enabled).label(tr("Start dictation with a wake word")).on_toggle(M::WakeEnabled),
+            labeled(tr("Wake word"), pick_list(wake_packages, wake_selected, M::WakePackage).width(320)),
             if phrase_mode {
                 column![
-                    labeled("Phrase", text_input("Hey Diktatoren", &d.wake_phrase).on_input(M::WakePhrase).width(320)),
-                    hint("Say the phrase on its own, or go straight on: “Hey Diktatoren, remind me to …”. While waiting, short utterances go to your speech server, are compared with the phrase, and are discarded."),
+                    labeled(tr("Phrase"), text_input("Hey Diktatoren", &d.wake_phrase).on_input(M::WakePhrase).width(320)),
+                    hint(tr("Say the phrase on its own, or go straight on: “Hey Diktatoren, remind me to …”. While waiting, short utterances go to your speech server, are compared with the phrase, and are discarded.")),
                 ]
                 .spacing(10)
                 .into()
             } else if let Some((progress, _)) = self.downloads.get(&d.wake_word_package) {
                 let fraction = progress.total.map_or(0.0, |t| progress.done as f32 / t.max(1) as f32);
-                row![text("Downloading…").size(13), progress_bar(0.0..=1.0, fraction).length(Length::Fixed(200.0)).girth(6)]
+                row![text(tr("Downloading…")).size(13), progress_bar(0.0..=1.0, fraction).length(Length::Fixed(200.0)).girth(6)]
                     .spacing(10)
                     .align_y(Alignment::Center)
                     .into()
             } else {
-                hint::<SettingsMessage>("A wake-word model listens for one fixed phrase on this computer and uses very little power.")
+                hint::<SettingsMessage>(tr("A wake-word model listens for one fixed phrase on this computer and uses very little power."))
             },
             sensitivity,
             labeled(
-                "Close if silent for",
+                tr("Close if silent for"),
                 row![
                     slider(5.0_f32..=120.0_f32, d.wake_listen_timeout_s as f32, M::WakeTimeout).step(5.0_f32).width(200),
                     text(format!("{} s", d.wake_listen_timeout_s)).size(13)
                 ]
                 .spacing(10),
             ),
-            hint("After a wake word, the dictation window closes again if nothing is said for this long, to undo false wakes. Once you have said something, it stays open."),
-            section("Microphone"),
-            labeled("Input", pick_list(mics, mic_selected, M::Microphone).width(320)),
+            hint(tr("After a wake word, the dictation window closes again if nothing is said for this long, to undo false wakes. Once you have said something, it stays open.")),
+            section(tr("Microphone")),
+            labeled(tr("Input"), pick_list(mics, mic_selected, M::Microphone).width(320)),
         ]
         .spacing(10)
         .into()
@@ -1053,10 +1071,10 @@ impl App {
         let selected = models.iter().find(|c| c.id == d.asr_server_model).cloned();
         let status = match &w.server_models {
             _ if d.asr_server.trim().is_empty() => {
-                "The address of an audio.cpp server (audiocpp_server), such as http://127.0.0.1:8099.".to_string()
+                tr("The address of an audio.cpp server (audiocpp_server), such as http://127.0.0.1:8099.").to_string()
             }
-            Ok(list) if list.is_empty() => "Press Connect to list the server's speech models.".into(),
-            Ok(_) => "Connected.".into(),
+            Ok(list) if list.is_empty() => tr("Press Connect to list the server's speech models.").into(),
+            Ok(_) => tr("Connected.").into(),
             Err(e) => e.clone(),
         };
         let connect = (!d.asr_server.trim().is_empty()).then_some(M::FetchServerModels);
@@ -1067,51 +1085,51 @@ impl App {
         let ai_selected = ai_models.iter().find(|c| c.id == d.ai_model).cloned();
         let ai_status = match &w.ai_models {
             _ if d.ai_server.trim().is_empty() => {
-                "An OpenAI-compatible server, such as llama.cpp's llama-server or LM Studio.".to_string()
+                tr("An OpenAI-compatible server, such as llama.cpp's llama-server or LM Studio.").to_string()
             }
-            Ok(list) if list.is_empty() => "Press Connect to list the server's models.".into(),
-            Ok(_) => "Connected.".into(),
+            Ok(list) if list.is_empty() => tr("Press Connect to list the server's models.").into(),
+            Ok(_) => tr("Connected.").into(),
             Err(e) => e.clone(),
         };
         let ai_connect = (!d.ai_server.trim().is_empty()).then_some(M::FetchAiModels);
         column![
-            section("Speech recognition"),
+            section(tr("Speech recognition")),
             labeled(
-                "Server",
+                tr("Server"),
                 row![
                     text_input("http://127.0.0.1:8099", &d.asr_server)
                         .on_input(M::AsrServer)
                         .on_submit_maybe(connect.clone())
                         .width(300),
-                    button("Connect").on_press_maybe(connect).style(secondary_button),
+                    button(tr("Connect")).on_press_maybe(connect).style(secondary_button),
                 ]
                 .spacing(8),
             ),
             labeled(
-                "Model",
-                pick_list(models, selected, M::AsrServerModel).placeholder("Connect first").width(300),
+                tr("Model"),
+                pick_list(models, selected, M::AsrServerModel).placeholder(tr("Connect first")).width(300),
             ),
             hint(status),
-            section("AI clean-up"),
+            section(tr("AI clean-up")),
             labeled(
-                "Clean up dictation",
+                tr("Clean up dictation"),
                 pick_list([AiMode::Off, AiMode::Punctuate, AiMode::Correct], Some(d.ai_mode), M::AiMode).width(300),
             ),
-            hint("A language model adds punctuation and capitals to what you dictate, and with “fixes” also corrects words the recogniser misheard. Your words appear at once and are tidied a moment later; “undo” brings back what was heard. Answers that rewrite the text are ignored."),
+            hint(tr("A language model adds punctuation and capitals to what you dictate, and with “fixes” also corrects words the recogniser misheard. Your words appear at once and are tidied a moment later; “undo” brings back what was heard. Answers that rewrite the text are ignored.")),
             labeled(
-                "Server",
+                tr("Server"),
                 row![
                     text_input("http://127.0.0.1:8003", &d.ai_server)
                         .on_input(M::AiServer)
                         .on_submit_maybe(ai_connect.clone())
                         .width(300),
-                    button("Connect").on_press_maybe(ai_connect).style(secondary_button),
+                    button(tr("Connect")).on_press_maybe(ai_connect).style(secondary_button),
                 ]
                 .spacing(8),
             ),
             labeled(
-                "Model",
-                pick_list(ai_models, ai_selected, M::AiModel).placeholder("Connect first").width(300),
+                tr("Model"),
+                pick_list(ai_models, ai_selected, M::AiModel).placeholder(tr("Connect first")).width(300),
             ),
             hint(ai_status),
         ]
@@ -1130,7 +1148,7 @@ impl App {
                 if p.is_installed(&dir) {
                     choice(&p.id, &name)
                 } else {
-                    choice(&p.id, &format!("{name} (downloads when chosen)"))
+                    choice(&p.id, &trf("{} (downloads when chosen)", &[&name]))
                 }
             })
             .collect()
@@ -1139,21 +1157,21 @@ impl App {
 
 fn output_page(d: &Settings) -> Element<'_, SettingsMessage> {
     use SettingsMessage as M;
-    let actions = vec![choice("insert", "Insert into the window"), choice("copy", "Copy to the clipboard")];
+    let actions = vec![choice("insert", tr("Insert into the window")), choice("copy", tr("Copy to the clipboard"))];
     let enter = actions[if d.enter_action == FinishAction::Copy { 1 } else { 0 }].clone();
-    let methods = vec![choice("paste", "Paste from the clipboard"), choice("type", "Type the text")];
+    let methods = vec![choice("paste", tr("Paste from the clipboard")), choice("type", tr("Type the text"))];
     let method = methods[if d.insert_method == InsertMethod::Type { 1 } else { 0 }].clone();
     column![
-        section("Finishing"),
-        labeled("Enter does", pick_list(actions, Some(enter), M::EnterAction).width(260)),
-        hint("Ctrl+Enter does the other. Shift+Enter starts a new line; Esc cancels."),
-        section("Inserting"),
-        labeled("Insert by", pick_list(methods, Some(method), M::InsertMethod).width(260)),
-        hint("Pasting is fast and handles any characters. Typing works where pasting is blocked."),
-        labeled("Paste shortcut", text_input("Ctrl+V", &d.paste_shortcut).on_input(M::PasteShortcut).width(160)),
-        hint("Terminals often want Ctrl+Shift+V or Shift+Insert."),
+        section(tr("Finishing")),
+        labeled(tr("Enter does"), pick_list(actions, Some(enter), M::EnterAction).width(260)),
+        hint(tr("Ctrl+Enter does the other. Shift+Enter starts a new line; Esc cancels.")),
+        section(tr("Inserting")),
+        labeled(tr("Insert by"), pick_list(methods, Some(method), M::InsertMethod).width(260)),
+        hint(tr("Pasting is fast and handles any characters. Typing works where pasting is blocked.")),
+        labeled(tr("Paste shortcut"), text_input("Ctrl+V", &d.paste_shortcut).on_input(M::PasteShortcut).width(160)),
+        hint(tr("Terminals often want Ctrl+Shift+V or Shift+Insert.")),
         checkbox(d.restore_clipboard)
-            .label("Put the previous clipboard contents back after pasting")
+            .label(tr("Put the previous clipboard contents back after pasting"))
             .on_toggle(M::RestoreClipboard),
     ]
     .spacing(10)
@@ -1171,7 +1189,7 @@ fn commands_page(d: &Settings) -> Element<'_, SettingsMessage> {
             let value = phrases.get(key).cloned().unwrap_or_default();
             list = list.push(
                 row![
-                    text(spec.label).size(14).width(230),
+                    text(tr(spec.label)).size(14).width(230),
                     text_input("", &value).on_input(move |v| M::Phrase(key, v)).size(14),
                 ]
                 .spacing(10)
@@ -1181,13 +1199,13 @@ fn commands_page(d: &Settings) -> Element<'_, SettingsMessage> {
         list
     };
     column![
-        checkbox(d.voice_commands).label("Recognise voice commands").on_toggle(M::VoiceCommands),
-        labeled("Language", pick_list(languages, Some(d.command_language), M::CommandLanguage).width(200)),
-        hint("Say a command on its own, with a short pause before and after. Each command takes the phrases listed, separated by commas; editing one makes the set Custom. The dictation window has two modes, switched by voice or with its Dictate / Edit buttons."),
-        section("In both modes"),
+        checkbox(d.voice_commands).label(tr("Recognise voice commands")).on_toggle(M::VoiceCommands),
+        labeled(tr("Language"), pick_list(languages, Some(d.command_language), M::CommandLanguage).width(200)),
+        hint(tr("Say a command on its own, with a short pause before and after. Each command takes the phrases listed, separated by commas; editing one makes the set Custom. The dictation window is always paused, dictating or editing, switched by voice or with its buttons.")),
+        section(tr("In every state")),
         list(true),
-        section("In Edit mode"),
-        hint("While editing, nothing you say is written as text unless something is selected. “Replace mandag med tirsdag” combines a replace verb and a separator."),
+        section(tr("In Edit mode")),
+        hint(tr("While editing, nothing you say is written as text unless something is selected. “Replace mandag med tirsdag” combines a replace verb and a separator.")),
         list(false),
     ]
     .spacing(10)
@@ -1209,8 +1227,8 @@ fn labeled<'a, M: 'a>(label: &'a str, control: impl Into<Element<'a, M>>) -> Ele
 impl std::fmt::Display for HotkeyMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            HotkeyMode::Toggle => "Toggle",
-            HotkeyMode::PushToTalk => "Push to talk",
+            HotkeyMode::Toggle => tr("Toggle"),
+            HotkeyMode::PushToTalk => tr("Push to talk"),
         })
     }
 }

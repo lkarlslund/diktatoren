@@ -80,7 +80,7 @@ impl std::fmt::Display for Language {
         f.write_str(match self {
             Language::English => "English",
             Language::Danish => "Dansk",
-            Language::Custom => "Custom",
+            Language::Custom => crate::i18n::tr("Custom"),
         })
     }
 }
@@ -116,10 +116,10 @@ pub fn specs() -> Vec<Spec> {
         danish,
     };
     vec![
-        fixed("insert", "Insert into the window", true, Insert, "insert, insert it, paste, paste it", "indsæt, sæt ind, indsæt teksten"),
-        fixed("copy", "Copy to the clipboard", true, Copy, "copy, copy it, copy that", "kopiér, kopier, kopiér det, kopier teksten"),
+        fixed("insert", "Insert", true, Insert, "insert, insert it, paste, paste it", "indsæt, sæt ind, indsæt teksten"),
+        fixed("copy", "Copy", true, Copy, "copy, copy it, copy that", "kopiér, kopier, kopiér det, kopier teksten"),
         fixed("cancel", "Cancel", true, Cancel, "cancel, cancel that, never mind", "annuller, annullér, afbryd, glem det"),
-        fixed("pause", "Stop listening", true, StopListening, "pause, stop listening, microphone off", "pause, stop med at lytte, hold pause, mikrofon fra"),
+        fixed("pause", "Pause (only dictate and edit are heard)", true, StopListening, "pause, stop listening, microphone off", "pause, stop med at lytte, hold pause, mikrofon fra"),
         fixed("edit_mode", "Edit mode (also leaves a pause)", true, EditMode, "edit, edit mode, editing", "redigér, rediger, redigering"),
         fixed("dictate_mode", "Dictate mode (also leaves a pause)", true, DictateMode, "dictate, dictation, dictate mode", "diktér, dikter, diktat"),
         fixed("next_sentence", "Next sentence", true, NextSentence, "next sentence, new sentence", "næste sætning, ny sætning"),

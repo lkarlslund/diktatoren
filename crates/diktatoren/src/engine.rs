@@ -729,7 +729,7 @@ impl Recogniser {
         let language = settings.language.clone();
         let url = settings.asr_server.trim().to_string();
         let model = settings.asr_server_model.trim().to_string();
-        let name = format!("{model} on {url}");
+        let name = format!("{model} · {url}");
         thread::Builder::new()
             .name("recogniser".into())
             .spawn(move || {

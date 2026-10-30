@@ -22,11 +22,11 @@ pub enum AiMode {
 
 impl std::fmt::Display for AiMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+        f.write_str(crate::i18n::tr(match self {
             AiMode::Off => "Off",
             AiMode::Punctuate => "Punctuation only",
             AiMode::Correct => "Punctuation and fixes",
-        })
+        }))
     }
 }
 

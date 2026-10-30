@@ -16,6 +16,7 @@ mod document;
 mod download;
 mod engine;
 mod hotkey;
+mod i18n;
 mod icon;
 mod ipc;
 mod output;
@@ -69,6 +70,7 @@ fn main() -> Result<()> {
         .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let settings = Settings::load();
+    i18n::set_language(settings.command_language);
     let command = args.first().map(String::as_str);
     match command {
         None => run_app(settings, None, "settings"),
