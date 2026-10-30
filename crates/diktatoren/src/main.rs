@@ -22,6 +22,7 @@ mod output;
 mod portal;
 mod remote;
 mod resample;
+mod theme;
 mod tray;
 mod wake;
 

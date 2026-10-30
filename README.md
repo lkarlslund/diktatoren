@@ -8,7 +8,9 @@ Speech is recognised by an [audio.cpp](https://github.com/lkarlslund/audio.cpp) 
 (`audiocpp_server`) that you run yourself, typically on the same machine with a GPU.
 Wake-word and voice detection run inside Diktatoren. No audio or text goes to anyone else.
 
-Runs on Windows, macOS and Linux (Wayland and X11) and lives in the system tray.
+Runs on Windows, macOS and Linux (Wayland and X11) and lives in the system tray. Its windows
+take their colours from the desktop: the KDE colour scheme, GNOME's style and accent colour, or
+the light/dark mode and accent colour of Windows and macOS.
 
 ## Using it
 

@@ -30,6 +30,7 @@ const EDITOR: &str = "dictation";
 pub fn run(settings: Settings, initial: Option<Action>) -> iced::Result {
     iced::daemon(move || App::boot(settings.clone(), initial), App::update, App::view)
         .title(App::title)
+        .theme(App::theme)
         .subscription(App::subscription)
         .run()
 }
@@ -139,6 +140,8 @@ struct App {
     downloads: HashMap<String, (Progress, Arc<AtomicBool>)>,
     status: String,
     grammar: commands::Grammar,
+    /// The desktop's colours, read when a window opens.
+    theme: Option<iced::Theme>,
     listening: bool,
     level: f32,
 }
@@ -161,11 +164,16 @@ impl App {
             downloads: HashMap::new(),
             status: "Starting…".into(),
             grammar,
+            theme: crate::theme::current(),
             listening: false,
             level: 0.0,
         };
         // Tray, hotkeys and clipboard need the event loop running on the main thread.
         (app, Task::done(Message::Init(initial)))
+    }
+
+    fn theme(&self, _id: window::Id) -> Option<iced::Theme> {
+        self.theme.clone()
     }
 
     fn title(&self, id: window::Id) -> String {
@@ -509,6 +517,7 @@ impl App {
         }
         let target = Target::capture();
         log::info!("dictation window opened");
+        self.theme = crate::theme::current();
         self.engine.send(EngineCommand::Standby(true));
         let (id, open) = window::open(window::Settings {
             size: Size::new(640.0, 280.0),
@@ -584,6 +593,7 @@ impl App {
             w.tab = tab;
             return window::gain_focus(w.id);
         }
+        self.theme = crate::theme::current();
         let (id, open) = window::open(window::Settings {
             size: Size::new(760.0, 620.0),
             min_size: Some(Size::new(560.0, 420.0)),
@@ -746,7 +756,7 @@ impl App {
             button(text(label).size(13))
                 .padding([3, 10])
                 .on_press(Message::SetMode(mode))
-                .style(if p.mode == mode { button::primary } else { button::secondary })
+                .style(if p.mode == mode { button::primary } else { secondary_button })
         };
         let header = row![
             text(state).size(14),
@@ -782,10 +792,10 @@ impl App {
         let buttons = row![
             button(if self.listening { "Pause" } else { "Listen" })
                 .on_press(Message::ToggleListening)
-                .style(button::secondary),
+                .style(secondary_button),
             space::horizontal(),
-            button("Cancel (Esc)").on_press(Message::Finish(Finish::Cancel)).style(button::secondary),
-            button(ctrl_label).on_press(Message::Finish(ctrl_finish)).style(button::secondary),
+            button("Cancel (Esc)").on_press(Message::Finish(Finish::Cancel)).style(secondary_button),
+            button(ctrl_label).on_press(Message::Finish(ctrl_finish)).style(secondary_button),
             button(enter_label).on_press(Message::Finish(enter_finish)),
         ]
         .spacing(8);
@@ -819,7 +829,7 @@ impl App {
             text(&self.status).size(12),
             space::horizontal(),
             text(if saved { "Saved" } else { "" }).size(13),
-            button("Close").on_press(M::Close).style(button::secondary),
+            button("Close").on_press(M::Close).style(secondary_button),
             button("Save").on_press_maybe(dirty.then_some(M::Save)),
         ]
         .spacing(8)
@@ -936,7 +946,7 @@ impl App {
                         .on_input(M::AsrServer)
                         .on_submit_maybe(connect.clone())
                         .width(300),
-                    button("Connect").on_press_maybe(connect).style(button::secondary),
+                    button("Connect").on_press_maybe(connect).style(secondary_button),
                 ]
                 .spacing(8),
             ),
@@ -1050,14 +1060,77 @@ fn bus_stream() -> impl futures::Stream<Item = BusEvent> {
     bus::take_receiver().unwrap_or_else(|| futures::channel::mpsc::unbounded().1)
 }
 
+/// A desktop-style button: the window background lifted slightly, with a thin border.
+fn secondary_button(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let palette = theme.palette();
+    let mix = |a: iced::Color, b: iced::Color, t: f32| iced::Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: 1.0,
+    };
+    let lift = match status {
+        button::Status::Hovered => 0.14,
+        button::Status::Pressed => 0.18,
+        _ => 0.07,
+    };
+    let border = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.primary,
+        _ => mix(palette.background, palette.text, 0.22),
+    };
+    button::Style {
+        background: Some(mix(palette.background, palette.text, lift).into()),
+        text_color: if status == button::Status::Disabled {
+            mix(palette.background, palette.text, 0.45)
+        } else {
+            palette.text
+        },
+        border: iced::Border { color: border, width: 1.0, radius: 4.0.into() },
+        ..Default::default()
+    }
+}
+
 /// A settings cog, drawn in the theme's text colour.
 fn gear<'a>() -> Element<'a, Message> {
-    const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="black" fill-rule="evenodd" d="M10.3 2h3.4l.5 2.6c.6.2 1.2.5 1.7.9l2.5-.9 1.7 2.9-2 1.8c.1.6.1 1.2 0 1.8l2 1.8-1.7 2.9-2.5-.9c-.5.4-1.1.7-1.7.9l-.5 2.6h-3.4l-.5-2.6c-.6-.2-1.2-.5-1.7-.9l-2.5.9-1.7-2.9 2-1.8a6 6 0 0 1 0-1.8l-2-1.8 1.7-2.9 2.5.9c.5-.4 1.1-.7 1.7-.9zM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" transform="translate(0 1)"/></svg>"#;
-    iced::widget::svg(iced::widget::svg::Handle::from_memory(SVG.as_bytes()))
+    static SVG: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let svg = SVG.get_or_init(|| gear_svg().into_bytes());
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(svg.clone()))
         .width(18)
         .height(18)
         .style(|theme: &iced::Theme, _| iced::widget::svg::Style { color: Some(theme.palette().text) })
         .into()
+}
+
+/// The outline of eight trapezoid teeth around (12, 12).
+fn gear_outline() -> Vec<(f32, f32)> {
+    let (outer, inner) = (11.0f32, 8.2f32);
+    (0..8)
+        .flat_map(|tooth| {
+            let base = tooth as f32 * 45.0;
+            [(-15.0, inner), (-9.0, outer), (9.0, outer), (15.0, inner)].map(|(offset, r)| {
+                let a = (base + offset).to_radians();
+                (12.0 + r * a.cos(), 12.0 + r * a.sin())
+            })
+        })
+        .collect()
+}
+
+/// The gear with a round hole, which even-odd filling cuts out.
+fn gear_svg() -> String {
+    let hole = 3.4f32;
+    let mut path = String::new();
+    for (i, (x, y)) in gear_outline().into_iter().enumerate() {
+        path.push_str(&format!("{}{x:.2} {y:.2}", if i == 0 { "M" } else { "L" }));
+    }
+    path.push_str(&format!(
+        "ZM{:.2} 12A{hole} {hole} 0 1 0 {:.2} 12A{hole} {hole} 0 1 0 {:.2} 12Z",
+        12.0 + hole,
+        12.0 - hole,
+        12.0 + hole
+    ));
+    format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="black" fill-rule="evenodd" d="{path}"/></svg>"#
+    )
 }
 
 fn window_icon() -> Option<window::Icon> {
@@ -1123,6 +1196,15 @@ fn fetch_server_models(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gear_is_centred() {
+        let outline = gear_outline();
+        let n = outline.len() as f32;
+        let (x, y) = outline.iter().fold((0.0, 0.0), |(x, y), p| (x + p.0, y + p.1));
+        assert!((x / n - 12.0).abs() < 0.01 && (y / n - 12.0).abs() < 0.01, "centre {} {}", x / n, y / n);
+        assert!(gear_svg().contains("M15.40 12A3.4"), "hole centred on (12, 12)");
+    }
 
     #[test]
     fn offsets_round_trip() {
