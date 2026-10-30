@@ -47,7 +47,8 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-22.04, target: linux-x86_64, features: "" }
-          - { os: ubuntu-22.04, target: linux-x86_64-vulkan, features: "vulkan" }
+          # 22.04 has no glslc for compiling the Vulkan shaders.
+          - { os: ubuntu-24.04, target: linux-x86_64-vulkan, features: "vulkan" }
           - { os: windows-2022, target: windows-x86_64, features: "" }
           - { os: macos-14, target: macos-arm64, features: "" }
     runs-on: ${{ matrix.os }}
@@ -98,7 +99,8 @@ jobs:
               ;;
           esac
           rm -rf "dist/$name"
-          (cd dist && for f in *; do shasum -a 256 "$f" > "$f.sha256"; done)
+          if command -v sha256sum >/dev/null; then sum="sha256sum"; else sum="shasum -a 256"; fi
+          (cd dist && for f in *; do $sum "$f" > "$f.sha256"; done)
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
